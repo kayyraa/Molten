@@ -17,6 +17,7 @@ local WindowTabs = require("Services.WindowTabs")
 local Ribbon = require("Services.Ribbon")
 local Dock = require("Services.Dock")
 local Gizmos = require("Services.Gizmos")
+local TextBox = _G.TextBox or require("Services.TextBox")
 
 local CurrentCamera
 
@@ -146,6 +147,30 @@ function love.keypressed(Key)
             return
         end
     end
+
+    -- Any active text field: only text editing keys, no editor shortcuts / tools
+    local textBusy = (TextBox and TextBox.IsActive and TextBox.IsActive())
+        or (Properties and Properties.IsEditing and Properties:IsEditing())
+        or (Explorer and Explorer.IsRenaming and Explorer:IsRenaming())
+
+    if textBusy then
+        if Properties and Properties.HandleKey and Properties:HandleKey(Key) then
+            return
+        end
+        if TextBox and TextBox.IsActive and TextBox.IsActive() and TextBox.HandleKey then
+            if TextBox.HandleKey(Key) then
+                return
+            end
+        end
+        if Explorer and Explorer.IsRenaming and Explorer:IsRenaming() and Explorer.HandleRenameKey then
+            if Explorer:HandleRenameKey(Key) then
+                return
+            end
+        end
+        -- Swallow remaining keys so WASD / Delete / tool hotkeys do nothing
+        return
+    end
+
     if Properties and Properties:IsEditing() then
         if Properties:HandleKey(Key) then
             return
@@ -622,7 +647,16 @@ function love.update(Delta)
         return
     end
 
-    local TextFocus = (Properties and Properties.IsEditing and Properties:IsEditing()) or (Explorer and Explorer.IsRenaming and Explorer:IsRenaming()) or (ScriptEditor and ScriptEditor.IsFocused and ScriptEditor:IsFocused()) or (WindowTabs and WindowTabs.IsScript and WindowTabs:IsScript() and ScriptEditor and ScriptEditor.GetActive and ScriptEditor:GetActive())
+    local TextFocus = (TextBox and TextBox.IsActive and TextBox.IsActive())
+        or (Properties and Properties.IsEditing and Properties:IsEditing())
+        or (Explorer and Explorer.IsRenaming and Explorer:IsRenaming())
+        or (ScriptEditor and ScriptEditor.IsFocused and ScriptEditor:IsFocused())
+        or (WindowTabs and WindowTabs.IsScript and WindowTabs:IsScript() and ScriptEditor and ScriptEditor.GetActive and ScriptEditor:GetActive())
+
+    -- Blink caret while any properties text field is focused
+    if TextFocus and Properties and Properties.Tick then
+        Properties:Tick()
+    end
 
     CurrentCamera:SetAttribute("Fov", Fabric.Lerp(
         CurrentCamera:GetAttribute("Fov"),

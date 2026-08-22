@@ -45,6 +45,7 @@ local Inheritance = {
     ImageLabel = {"ImageLabel", "GuiObject", "GuiBase2D", "Instance"},
     UiPadding = {"UiPadding", "Instance"},
     Highlight = {"Highlight", "Instance"},
+    SurfaceAppearance = {"SurfaceAppearance", "Instance"},
     Lighting = {"Lighting", "Instance"},
     Workspace = {"Workspace", "Instance"},
     ReplicatedStorage = {"ReplicatedStorage", "Instance"},
@@ -143,6 +144,17 @@ local Defaults = {
         Shape = "Mesh"
     },
 
+    SurfaceAppearance = {
+        ColorMap = "",
+        MetalnessMap = "",
+        RoughnessMap = "",
+        NormalMap = "",
+        Color = Color.FromRGBA(255, 255, 255),
+        Roughness = 0.5,
+        Metalness = 0,
+        AlphaMode = "Overlay",
+    },
+
     Decal = {
         Face = "Front",
         Texture = "",
@@ -223,6 +235,7 @@ local Defaults = {
         GlobalShadows = true,
         EnvironmentDiffuseScale = 1,
         EnvironmentSpecularScale = 1,
+        Rendering = "RayTraced",
     },
 
     Workspace = {

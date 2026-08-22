@@ -98,7 +98,7 @@ local InsertGroups = {
     },
     {
         Name = "Appearance",
-        Items = {"Decal", "Texture"},
+        Items = {"Decal", "SurfaceAppearance", "Texture"},
     },
     {
         Name = "Camera",

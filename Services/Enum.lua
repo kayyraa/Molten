@@ -1,5 +1,10 @@
 local Enum = {}
 
+Enum.Rendering = {
+    RayTraced = "RayTraced",
+    Rasterized = "Rasterized",
+}
+
 Enum.RaycastFilterMode = {
     Exclude = "Exclude",
     Include = "Include",

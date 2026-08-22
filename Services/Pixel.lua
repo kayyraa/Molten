@@ -4,8 +4,48 @@ local ShaderService = require("Services.Shader")
 local CFrame = require("Services.CFrame")
 local Geometry = require("Services.Geometry")
 
-local PixelShader = ShaderService.New("Shaders/Pixel.glsl")
+local RayTracedShader = ShaderService.New("Shaders/Pixel.glsl")
 local PostShader = ShaderService.New("Shaders/Post.glsl")
+
+-- Active scene shader (hot-switched via Lighting.Rendering)
+local PixelShader = RayTracedShader
+local ActiveRenderingMode = "RayTraced"
+local RasterShader = nil
+
+do
+    local ok, sh = pcall(function()
+        return ShaderService.New("Shaders/Raster.glsl")
+    end)
+    if ok and sh then
+        RasterShader = sh
+        print("[Pixel] Raster.glsl loaded (Lighting.Rendering = Rasterized)")
+    else
+        print("[Pixel] Raster.glsl FAILED to compile — Rasterized mode unavailable:")
+        print(tostring(sh))
+    end
+end
+
+local function EnsureRasterShader()
+    return RasterShader
+end
+
+local function SelectSceneShader(mode)
+    mode = tostring(mode or "RayTraced")
+    if mode == "Rasterized" then
+        local sh = EnsureRasterShader()
+        if sh then
+            PixelShader = sh
+            ActiveRenderingMode = "Rasterized"
+            return
+        end
+    end
+    PixelShader = RayTracedShader
+    ActiveRenderingMode = "RayTraced"
+end
+
+function Pixel.GetRenderingMode()
+    return ActiveRenderingMode
+end
 
 local TextureCache = {}
 local DefaultTexture
@@ -230,23 +270,54 @@ function Pixel.Render(Camera)
 
             local Col = ToRgbColor(Child.Color or Child:GetAttribute("Color"))
             local Mat = Child.Material or Child:GetAttribute("Material") or {}
-            local ColorTexIndex = GetOrAddTexture(Mat.Color, 0)
-            local NormalTexIndex = GetOrAddTexture(Mat.Normal, 1)
+            if type(Mat) ~= "table" or Mat.ToArray then
+                Mat = {}
+            end
+
+            -- SurfaceAppearance can parent to BasePart; overrides maps + PBR scalars
+            local SA = nil
+            do
+                local ok, kids = pcall(function()
+                    return Child:GetChildrenOfClass("SurfaceAppearance")
+                end)
+                if ok and kids and kids[1] then SA = kids[1] end
+            end
+
+            local colorMap = (SA and SA.ColorMap and SA.ColorMap ~= "" and SA.ColorMap)
+                or Mat.ColorMap or Mat.Color
+            local normalMap = (SA and SA.NormalMap and SA.NormalMap ~= "" and SA.NormalMap)
+                or Mat.NormalMap or Mat.Normal
+            local ColorTexIndex = GetOrAddTexture(colorMap, 0)
+            local NormalTexIndex = GetOrAddTexture(normalMap, 1)
 
             local Roughness = Mat.Roughness or Child:GetAttribute("Roughness") or 0.5
             local Reflectivity = Mat.Reflectivity or Child:GetAttribute("Reflectivity") or 0
+            local Metalness = Mat.Metalness or Child:GetAttribute("Metalness") or 0
             local Refractivity = Mat.Refractivity or Child:GetAttribute("Refractivity") or 0
+
+            if SA then
+                if type(SA.Roughness) == "number" then Roughness = SA.Roughness end
+                if type(SA.Metalness) == "number" then Metalness = SA.Metalness end
+                if SA.Color then Col = ToRgbColor(SA.Color) end
+            end
 
             if type(Roughness) == "number" then
                 Roughness = math.max(0, math.min(1, Roughness))
             else
                 Roughness = 0.5
             end
+            if type(Metalness) == "number" then
+                Metalness = math.max(0, math.min(1, Metalness))
+            else
+                Metalness = 0
+            end
             if type(Reflectivity) == "number" then
                 Reflectivity = math.max(0, math.min(1, Reflectivity))
             else
                 Reflectivity = 0
             end
+            -- Metalness contributes to reflectivity for the current shading model
+            Reflectivity = math.max(Reflectivity, Metalness * 0.85)
             if type(Refractivity) == "number" then
                 Refractivity = math.max(0, math.min(1, Refractivity))
             else
@@ -553,48 +624,9 @@ function Pixel.Render(Camera)
     local TRI_POOL_MAX = 96
 
     for _, Box in ipairs(Boxes) do
-        local Part = Box._Part
-        local ShapeName = nil
-
-        if Box.ShapeType == 5 then
-            ShapeName = "CornerWedge"
-        end
-
-        -- Pack triangle mesh for shapes without an analytical shader path
-        if ShapeName and Part then
-            local SizeArr = Box.Size
-            if type(SizeArr) == "table" and SizeArr.ToArray then
-                SizeArr = SizeArr:ToArray()
-            end
-
-            local Mesh = Geometry.GetMesh(ShapeName, SizeArr or {4, 4, 4})
-            local StartTri = math.floor(#TriPool / 3)
-            local Added = 0
-
-            for _, Tri in ipairs(Mesh.Triangles) do
-                if #TriPool + 3 > TRI_POOL_MAX then
-                    break
-                end
-
-                local A = Mesh.Vertices[Tri[1]]
-                local B = Mesh.Vertices[Tri[2]]
-                local C = Mesh.Vertices[Tri[3]]
-
-                TriPool[#TriPool + 1] = {A[1], A[2], A[3]}
-                TriPool[#TriPool + 1] = {B[1], B[2], B[3]}
-                TriPool[#TriPool + 1] = {C[1], C[2], C[3]}
-                Added = Added + 1
-            end
-
-            Box.TriStart = StartTri
-            Box.TriCount = Added
-            -- Route through mesh intersector (Shape >= 10)
-            Box.ShapeType = 10
-        else
-            Box.TriStart = -1
-            Box.TriCount = 0
-        end
-
+        -- Analytical shapes (incl. CornerWedge = 5) need no triangle pool
+        Box.TriStart = -1
+        Box.TriCount = 0
         Box._Part = nil
     end
 
@@ -783,6 +815,30 @@ function Pixel.Render(Camera)
     end
 
     -- -----------------------------------------------------------------------
+    -- Hot-switch scene shader from Lighting.Rendering
+    -- -----------------------------------------------------------------------
+    local renderMode = "RayTraced"
+    if Lighting then
+        local rm = rawget(Lighting, "Rendering")
+        if rm == nil and Lighting.GetAttribute then
+            rm = Lighting:GetAttribute("Rendering")
+        end
+        if type(rm) == "string" and rm ~= "" then
+            -- Accept "Rasterized", "Enum.Rendering.Rasterized", etc.
+            local leaf = rm:match("([^%.]+)$") or rm
+            if leaf == "Rasterized" or leaf == "RayTraced" then
+                renderMode = leaf
+            elseif rm:lower():find("raster") then
+                renderMode = "Rasterized"
+            end
+        end
+    end
+    if renderMode ~= ActiveRenderingMode then
+        SelectSceneShader(renderMode)
+        print("[Pixel] Rendering mode →", ActiveRenderingMode)
+    end
+
+    -- -----------------------------------------------------------------------
     -- Send uniforms to shader
     -- -----------------------------------------------------------------------
 
@@ -933,15 +989,17 @@ function Pixel.Render(Camera)
     -- Temporal weight: high when still, low when moving
     local temporalAlpha = 0.12 + math.min(0.75, motion * 0.35)
 
+    local isRaster = (ActiveRenderingMode == "Rasterized")
     PostShader:Bind()
     PostShader:Send({
         Resolution = {Width, Height},
-        DenoiseStrength = Pixel.DenoiseStrength or 0.55,
-        FxaaQuality = Pixel.FxaaQuality or 8.0,
-        TemporalAlpha = temporalAlpha,
+        -- Raster: almost no denoise / temporal so the flat look stays sharp
+        DenoiseStrength = isRaster and 0.05 or (Pixel.DenoiseStrength or 0.55),
+        FxaaQuality = isRaster and 2.0 or (Pixel.FxaaQuality or 8.0),
+        TemporalAlpha = isRaster and 0.95 or temporalAlpha,
         FrameIndex = FrameIndex % 1024,
-        RestirRadius = Pixel.RestirRadius or 3.0,
-        RestirSamples = Pixel.RestirSamples or 8.0,
+        RestirRadius = isRaster and 0.5 or (Pixel.RestirRadius or 3.0),
+        RestirSamples = isRaster and 1.0 or (Pixel.RestirSamples or 8.0),
     })
     -- History as second texture unit if shader supports it
     pcall(function()

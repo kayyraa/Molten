@@ -72,6 +72,7 @@ local PropertySchema = {
     ColorShift_Bottom = { type = "color" },
     BackgroundColor = { type = "color" },
     WaterColor = { type = "color" },
+    Rendering = { type = "enum" },
 }
 
 local AttrTypes = {
@@ -84,15 +85,18 @@ local AttrTypes = {
 
 -- Enum maps for dropdown properties (Studio-like)
 local EnumMaps = {
+    Rendering = { "RayTraced", "Rasterized" },
     Shape = { "Block", "Ball", "Cylinder", "Wedge", "CornerWedge", "Cone" },
     Face = { "Top", "Bottom", "Front", "Back", "Left", "Right" },
     DepthMode = { "AlwaysOnTop", "Occluded" },
-    Material = {
-        "Plastic", "SmoothPlastic", "Neon", "Wood", "Metal", "Concrete", "Glass",
-        "Fabric", "Sand", "Grass", "Ice", "Brick", "Granite", "Marble", "ForceField",
-        "Slate", "Cobblestone", "WoodPlanks", "Foil", "DiamondPlate",
-    },
+    -- Material is PBR fields only (Reflectivity/Roughness/Metalness/Refractivity), not an enum
 }
+
+local function NormalizeEnumValue(Value)
+    if type(Value) ~= "string" then return Value end
+    local leaf = Value:match("([^%.]+)$") or Value
+    return leaf
+end
 
 local function GetEnumOptions(Path, Value)
     local leaf = ""
@@ -101,12 +105,32 @@ local function GetEnumOptions(Path, Value)
     end
     local opts = EnumMaps[leaf]
     if opts then return opts end
-    -- String value that matches a known enum set
+
     if type(Value) == "string" then
+        local norm = NormalizeEnumValue(Value)
         for _, list in pairs(EnumMaps) do
             for _, v in ipairs(list) do
-                if v == Value then return list end
+                if v == Value or v == norm then return list end
             end
+        end
+    end
+
+    -- Enum-style table: { RayTraced = "RayTraced", Rasterized = "Rasterized" }
+    if type(Value) == "table" and Value.ToArray == nil and Value.ClassName == nil then
+        local keys = {}
+        local n = 0
+        for k, v in pairs(Value) do
+            if type(k) == "string" and type(v) == "string" then
+                keys[#keys + 1] = v
+                n = n + 1
+            elseif type(k) == "number" and type(v) == "string" then
+                keys[#keys + 1] = v
+                n = n + 1
+            end
+        end
+        if n >= 2 and #keys == n then
+            table.sort(keys)
+            return keys
         end
     end
     return nil
@@ -540,8 +564,32 @@ local function AddEntries(Out, FullPath, Display, Value, Depth, IsAttr)
         return
     end
 
-    if FullPath == "Material" and IsDict(Value) then
-        RealValue = MergeMaterial(Value)
+    -- Enum properties (Rendering, Shape, …) always become a single dropdown row
+    do
+        local enumOpts = GetEnumOptions(FullPath, RealValue)
+        if enumOpts then
+            local raw = RealValue
+            if type(RealValue) == "table" then
+                raw = enumOpts[1]
+                -- Prefer currently selected string if stored on the node under a known form
+            elseif type(RealValue) == "string" then
+                raw = NormalizeEnumValue(RealValue)
+            end
+            Out[#Out + 1] = {
+                FullPath = FullPath, Display = Display, Depth = Depth,
+                IsGroup = false, Type = "Enum", Raw = raw, IsAttr = IsAttr,
+                EnumOptions = enumOpts,
+            }
+            return
+        end
+    end
+
+    if FullPath == "Material" then
+        if type(Value) == "string" or Value == nil then
+            RealValue = MergeMaterial(nil)
+        elseif IsDict(Value) then
+            RealValue = MergeMaterial(Value)
+        end
     end
 
     if IsDict(RealValue) then
@@ -603,9 +651,22 @@ local function AddEntries(Out, FullPath, Display, Value, Depth, IsAttr)
             end
         end
     else
+        local enumOpts = GetEnumOptions(FullPath, RealValue)
+        local raw = RealValue
+        local typ = type(RealValue)
+        if enumOpts then
+            typ = "Enum"
+            -- Coerce Enum.Xxx table → current string value (prefer first option / match)
+            if type(RealValue) == "table" then
+                raw = enumOpts[1]
+            elseif type(RealValue) == "string" then
+                raw = NormalizeEnumValue(RealValue)
+            end
+        end
         Out[#Out + 1] = {
             FullPath = FullPath, Display = Display, Depth = Depth,
-            IsGroup = false, Type = type(RealValue), Raw = RealValue, IsAttr = IsAttr
+            IsGroup = false, Type = typ, Raw = raw, IsAttr = IsAttr,
+            EnumOptions = enumOpts,
         }
     end
 end
@@ -624,6 +685,7 @@ local function EnsureServiceDefaults(Node)
             FogStart = 0, FogEnd = 100000,
             GlobalShadows = true,
             EnvironmentDiffuseScale = 1, EnvironmentSpecularScale = 1,
+            Rendering = "RayTraced",
         }
     elseif Node.ClassName == "Workspace" then
         ensure = { Gravity = 196.2, FallenPartsDestroyHeight = -500, StreamingEnabled = false }
@@ -841,17 +903,21 @@ function OpenColorPicker(Entry, screenX, screenY)
         txt.Size = UDim.FromScale(1, 1)
         txt.TextAlignment = { "Center", "Center" }
         channelLabels[channel] = txt
+        box.Name = "ChannelBox" .. tostring(channel)
 
-        box.OnClick:Connect(function()
+        local function beginChannelEdit()
             if not ColorPicker then return end
             local meta = {
                 FullPath = (Entry.FullPath or "") .. ".__ch" .. channel,
-                Raw = math.floor(value * 255 + 0.5),
+                Raw = math.floor((ColorPicker.color[channel] or 0) * 255 + 0.5),
                 IsAttr = Entry.IsAttr,
                 Buffer = tostring(math.floor((ColorPicker.color[channel] or 0) * 255 + 0.5)),
                 Cursor = 1, SelectAll = true, channel = channel,
             }
             Editing = meta
+            ColorPicker.activeChannel = channel
+            ColorPicker.channelLabels = channelLabels
+            box.BackgroundColor = Color.FromRGBA(50, 90, 140)
             TextBox.Begin({
                 id = "properties",
                 text = meta.Buffer,
@@ -863,7 +929,11 @@ function OpenColorPicker(Entry, screenX, screenY)
                     Editing.Buffer = s.Buffer
                     Editing.Cursor = s.Cursor
                     Editing.SelectAll = s.SelectAll
-                    txt.Text = s.Buffer
+                    if TextBox.FormatDisplay then
+                        txt.Text = TextBox.FormatDisplay(Editing)
+                    else
+                        txt.Text = s.Buffer
+                    end
                 end,
                 onCommit = function(text)
                     local n = tonumber(text)
@@ -875,11 +945,23 @@ function OpenColorPicker(Entry, screenX, screenY)
                         }
                         txt.Text = tostring(math.floor(n * 255 + 0.5))
                     end
+                    box.BackgroundColor = Color.FromRGBA(32, 32, 36)
+                    if ColorPicker then ColorPicker.activeChannel = nil end
                     Editing = nil
                 end,
-                onCancel = function() Editing = nil end,
+                onCancel = function()
+                    box.BackgroundColor = Color.FromRGBA(32, 32, 36)
+                    if ColorPicker then ColorPicker.activeChannel = nil end
+                    Editing = nil
+                    txt.Text = tostring(math.floor((ColorPicker and ColorPicker.color[channel] or 0) * 255 + 0.5))
+                end,
             })
-        end)
+            if TextBox.FormatDisplay then
+                txt.Text = TextBox.FormatDisplay(meta)
+            end
+        end
+        box.OnClick:Connect(beginChannelEdit)
+        txt.OnClick:Connect(beginChannelEdit)
     end
 
     makeChannel("R", r, 36, 1)
@@ -1294,17 +1376,9 @@ local function BuildRow(Parent, Entry, RowIndex)
         end
     else
         if IsEditing then
-            ValueFrame.BackgroundColor = Editing.Error and Color.FromRGBA(90, 30, 30) or Color.FromRGBA(50, 70, 110)
-            if Editing.SelectAll then
-                ValueLabel.Text = Editing.Buffer or ""
-                ValueLabel.TextColor = Color.FromRGBA(255, 255, 255)
-            else
-                local Before = (Editing.Buffer or ""):sub(1, (Editing.Cursor or 1) - 1)
-                local After = (Editing.Buffer or ""):sub(Editing.Cursor or 1)
-                local Blink = (math.floor(love.timer.getTime() * 2) % 2 == 0) and "|" or ""
-                ValueLabel.Text = Before .. Blink .. After
-                ValueLabel.TextColor = Color.FromRGBA(255, 255, 180)
-            end
+            ValueFrame.BackgroundColor = Editing.Error and Color.FromRGBA(90, 30, 30) or Color.FromRGBA(50, 90, 140)
+            ValueLabel.Text = TextBox.FormatDisplay and TextBox.FormatDisplay(Editing) or (Editing.Buffer or "")
+            ValueLabel.TextColor = Color.FromRGBA(255, 255, 200)
         elseif type(Entry.Raw) == "boolean" then
             ValueLabel.Text = ""
             local state = ResolveBoolState(Entry)
@@ -1338,7 +1412,10 @@ local function BuildRow(Parent, Entry, RowIndex)
                 Properties:Refresh()
             end)
         else
-            local enumOpts = (type(Entry.Raw) == "string") and GetEnumOptions(Entry.FullPath, Entry.Raw) or nil
+            local enumOpts = Entry.EnumOptions or GetEnumOptions(Entry.FullPath, Entry.Raw)
+            if Entry.Type == "Enum" and not enumOpts then
+                enumOpts = GetEnumOptions(Entry.FullPath, Entry.Raw)
+            end
             ValueLabel.Text = FormatValue(Entry.Raw, Entry.FullPath)
             local isColorChannel = Entry.FullPath and Entry.FullPath:lower():find("color") and type(Entry.Raw) == "number"
             if isColorChannel then
@@ -1671,12 +1748,46 @@ end
 
 function Properties:IsEditing()
     if Editing then return true end
-    if ColorPicker or AttrDialog or EnumDropdown then return true end
-    if TextBox and TextBox.IsActive() then
+    if TextBox and TextBox.IsActive and TextBox.IsActive() then
         local a = TextBox.Get()
-        if a and a.id == "properties" then return true end
+        if a and (a.id == "properties" or a.id == "attr" or a.id == "color") then
+            return true
+        end
     end
+    -- Dialogs open still block camera/shortcuts
+    if ColorPicker or AttrDialog then return true end
     return false
+end
+
+
+local _LastCaretBlink = -1
+function Properties:Tick()
+    -- Keep caret blinking without full rebuild when possible
+    if not Editing then return end
+    if TextBox and TextBox.IsActive and TextBox.IsActive() then
+        local a = TextBox.Get()
+        if a then
+            Editing.Buffer = a.Buffer
+            Editing.Cursor = a.Cursor
+            Editing.SelectAll = a.SelectAll
+        end
+    end
+    local phase = math.floor(love.timer.getTime() * 2)
+    -- Color picker channel caret (no full panel rebuild)
+    if ColorPicker and ColorPicker.activeChannel and ColorPicker.channelLabels then
+        local lab = ColorPicker.channelLabels[ColorPicker.activeChannel]
+        if lab and TextBox.FormatDisplay then
+            lab.Text = TextBox.FormatDisplay(Editing)
+        end
+        return
+    end
+    -- Property row caret: refresh only when blink phase flips
+    if Editing and Editing.FullPath and not (Editing.FullPath:find("__ch", 1, true)) then
+        if phase ~= _LastCaretBlink then
+            _LastCaretBlink = phase
+            Properties:Refresh()
+        end
+    end
 end
 
 function Properties:ClosePopups()

@@ -301,6 +301,73 @@ float IntersectWedge(vec3 Ro, vec3 Rd, vec3 Center, vec3 Size, out vec3 Normal) 
     return T;
 }
 
+// Roblox-style CornerWedge: AABB clipped by two slope planes meeting at peak (-hx,+hy,+hz)
+float IntersectCornerWedge(vec3 Ro, vec3 Rd, vec3 Center, vec3 Size, out vec3 Normal) {
+    vec3 Half = Size * 0.5;
+    float tEnter = 0.0;
+    float tExit = 1e9;
+    vec3 nEnter = vec3(0.0);
+    vec3 Peak = Center + vec3(-Half.x, Half.y, Half.z);
+    vec3 BXR = Center + vec3( Half.x, -Half.y,  Half.z);
+    vec3 BXN = Center + vec3( Half.x, -Half.y, -Half.z);
+    vec3 BNN = Center + vec3(-Half.x, -Half.y, -Half.z);
+    vec3 nA = normalize(cross(BXR - Peak, BXN - Peak));
+    if (dot(nA, BNN - Peak) > 0.0) nA = -nA;
+    vec3 nB = normalize(cross(BNN - Peak, BXN - Peak));
+    if (dot(nB, BXR - Peak) > 0.0) nB = -nB;
+
+    vec3 boxN[6];
+    float boxD[6];
+    boxN[0] = vec3( 1.0, 0.0, 0.0); boxD[0] = Center.x + Half.x;
+    boxN[1] = vec3(-1.0, 0.0, 0.0); boxD[1] = -(Center.x - Half.x);
+    boxN[2] = vec3( 0.0, 1.0, 0.0); boxD[2] = Center.y + Half.y;
+    boxN[3] = vec3( 0.0,-1.0, 0.0); boxD[3] = -(Center.y - Half.y);
+    boxN[4] = vec3( 0.0, 0.0, 1.0); boxD[4] = Center.z + Half.z;
+    boxN[5] = vec3( 0.0, 0.0,-1.0); boxD[5] = -(Center.z - Half.z);
+
+    for (int i = 0; i < 6; i++) {
+        vec3 n = boxN[i];
+        float d = boxD[i];
+        float denom = dot(n, Rd);
+        float numer = d - dot(n, Ro);
+        if (abs(denom) < 1e-8) {
+            if (numer < -1e-5) return -1.0;
+            continue;
+        }
+        float t = numer / denom;
+        if (denom < 0.0) {
+            if (t > tEnter) { tEnter = t; nEnter = -n; }
+        } else {
+            if (t < tExit) tExit = t;
+        }
+        if (tEnter > tExit) return -1.0;
+    }
+    for (int p = 0; p < 2; p++) {
+        vec3 n = (p == 0) ? nA : nB;
+        float d = dot(n, Peak);
+        float denom = dot(n, Rd);
+        float numer = d - dot(n, Ro);
+        if (abs(denom) < 1e-8) {
+            if (numer < -1e-5) return -1.0;
+        } else {
+            float t = numer / denom;
+            if (denom < 0.0) {
+                if (t > tEnter) { tEnter = t; nEnter = -n; }
+            } else {
+                if (t < tExit) tExit = t;
+            }
+            if (tEnter > tExit) return -1.0;
+        }
+    }
+    if (tExit < 0.001) return -1.0;
+    float T = (tEnter > 0.001) ? tEnter : tExit;
+    if (T < 0.001) return -1.0;
+    Normal = nEnter;
+    if (length(Normal) < 0.1) IntersectBox(Ro, Rd, Center, Half, Normal);
+    if (dot(Normal, Rd) > 0.0) Normal = -Normal;
+    return T;
+}
+
 // M╬ô├▓┬╝Γö£Γöñ╬ô├╢┬ú╬ô├▓├│╬ô├╢┬╝Γö£Γòæ╬ô├▓┬╝Γö£Γöñ╬ô├╢┬ú╬ô├╗├┤╬ô├╢┬ú╬ô├╢├⌐llerΓò¼├┤Γö£ΓûôΓö¼Γò¥╬ô├╢┬ú╬ô├╢├▒Γò¼├┤Γö£ΓòóΓö¼├║╬ô├╢┬úΓö¼ΓòæΓò¼├┤Γö£ΓòóΓö¼├║Γò¼├┤Γö£ΓòóΓö£ΓûÆTrumbore triangle intersection (local-space verts, world Pos offset)
 float IntersectTriangle(vec3 Ro, vec3 Rd, vec3 A, vec3 B, vec3 C, out vec3 Normal) {
     vec3 E1 = B - A;
@@ -430,6 +497,8 @@ float IntersectShape(int I, vec3 Ro, vec3 Rd, out vec3 Normal) {
         T = IntersectWedge(RoL, RdL, Pos, Size, Normal);
     } else if (Shape == 4) {
         T = IntersectCone(RoL, RdL, Pos, Size, Normal);
+    } else if (Shape == 5) {
+        T = IntersectCornerWedge(RoL, RdL, Pos, Size, Normal);
     } else if (Shape >= 10 && Boxes[I].TriCount > 0.5) {
         T = IntersectMesh(I, RoL, RdL, Normal);
     } else {
