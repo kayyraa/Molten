@@ -43,7 +43,7 @@ do
         RasterShader = sh
         print("[Pixel] Raster.glsl loaded (Lighting.Rendering = Rasterized)")
     else
-        print("[Pixel] Raster.glsl FAILED to compile Γò¼├┤Γö£├ºΓö£Γòó Rasterized mode unavailable:")
+        print("[Pixel] Raster.glsl FAILED to compile ╬ô├▓┬╝Γö£Γöñ╬ô├╢┬úΓö£┬║╬ô├╢┬ú╬ô├▓├│ Rasterized mode unavailable:")
         print(tostring(sh))
     end
 end
@@ -242,8 +242,9 @@ function Pixel.Render(Camera)
         return {Col[1] or 1, Col[2] or 1, Col[3] or 1}
     end
 
-    local STREAM_MAX = 16
-    local STREAM_BASE_DIST = 400
+    local STREAM_MAX = 24
+    local STREAM_COLLECT = 2048
+    local STREAM_BASE_DIST = 20000
     local CamPos = Cf.Position
     local Candidates = {}
 
@@ -259,14 +260,19 @@ function Pixel.Render(Camera)
             return
         end
         if not ForceSingle and Child.ClassName == "UnionOperation" and type(rawget(Child, "SolidPieces")) == "table" and #Child.SolidPieces > 0 then
-            local SavedPos = Child.Position
-            local SavedSize = Child.Size
-            local SavedOri = Child.Orientation
             local Ux, Uy, Uz = 0, 0, 0
             local PosRaw = Child.Position
             if type(PosRaw) == "table" then
                 if PosRaw.ToArray then PosRaw = PosRaw:ToArray() end
                 Ux, Uy, Uz = PosRaw[1] or 0, PosRaw[2] or 0, PosRaw[3] or 0
+            end
+            local Sx, Sy, Sz = 4, 4, 4
+            local SizeRaw = Child.Size
+            if type(SizeRaw) == "table" then
+                if SizeRaw.ToArray then SizeRaw = SizeRaw:ToArray() end
+                Sx = math.abs(SizeRaw[1] or 4)
+                Sy = math.abs(SizeRaw[2] or 4)
+                Sz = math.abs(SizeRaw[3] or 4)
             end
             local Ox, Oy, Oz = 0, 0, 0
             local OriRaw = Child.Orientation
@@ -288,23 +294,114 @@ function Pixel.Render(Camera)
                 local Z3 = Y2 * Sx_ + Z2 * Cx
                 return X3, Y3, Z3
             end
-            for SI = 1, #Child.SolidPieces do
-                local Sp = Child.SolidPieces[SI]
-                if Sp and Sp.Position and Sp.Size then
-                    local P = Sp.Position
-                    local S = Sp.Size
-                    if type(P) == "table" and P.ToArray then P = P:ToArray() end
-                    if type(S) == "table" and S.ToArray then S = S:ToArray() end
-                    local Rx, Ry, Rz = RotLocal(P[1] or 0, P[2] or 0, P[3] or 0)
-                    Child.Position = {Ux + Rx, Uy + Ry, Uz + Rz}
-                    Child.Size = {math.abs(S[1] or 1), math.abs(S[2] or 1), math.abs(S[3] or 1)}
-                    Child.Orientation = {0, 0, 0}
-                    ConsiderPart(Child, true)
+
+            local DxU = Ux - CamPos[1]
+            local DyU = Uy - CamPos[2]
+            local DzU = Uz - CamPos[3]
+            local DistU = math.sqrt(DxU * DxU + DyU * DyU + DzU * DzU)
+            local ExtentU = 0.5 * math.sqrt(Sx * Sx + Sy * Sy + Sz * Sz)
+            local PieceCount = #Child.SolidPieces
+            local ExpandPieces = (PieceCount <= 8) and (DistU - ExtentU < 40)
+
+            -- Always submit the overall union AABB so the object never vanishes
+            do
+                local SortDist = DistU
+                if Child.Locked == true then SortDist = SortDist - 10000 end
+                local Col = Child.Color
+                local C = {1, 1, 1}
+                if type(Col) == "table" then
+                    if Col[1] and Col[1] > 1 then
+                        C = {Col[1] / 255, Col[2] / 255, Col[3] / 255}
+                    else
+                        C = {Col[1] or 1, Col[2] or 1, Col[3] or 1}
+                    end
+                end
+                local Mat = Child.Material or {}
+                local Rough = (type(Mat) == "table" and Mat.Roughness) or 0.5
+                local Refl = (type(Mat) == "table" and Mat.Reflectivity) or 0
+                local Trans = Child.Transparency or 0
+                table.insert(Candidates, {
+                    Position = {Ux, Uy, Uz},
+                    Size = {Sx, Sy, Sz},
+                    Orientation = {Ox, Oy, Oz},
+                    Color = C,
+                    HasDecal = 0,
+                    UvStuds = {16, 16},
+                    UvOffset = {0, 0},
+                    ColorTexIndex = 0,
+                    NormalTexIndex = 1,
+                    DecalTexIndex = 0,
+                    DecalColor = {1, 1, 1},
+                    DecalAlpha = 1,
+                    Roughness = Rough,
+                    Reflectivity = Refl,
+                    Refractivity = 0,
+                    Transparency = Trans,
+                    ShapeType = 0,
+                    IsHighlighted = 0,
+                    AlwaysOnTop = 0,
+                    Dist = SortDist,
+                })
+            end
+
+            if ExpandPieces then
+                local Col = Child.Color
+                local C = {1, 1, 1}
+                if type(Col) == "table" then
+                    if Col[1] and Col[1] > 1 then
+                        C = {Col[1] / 255, Col[2] / 255, Col[3] / 255}
+                    else
+                        C = {Col[1] or 1, Col[2] or 1, Col[3] or 1}
+                    end
+                end
+                local Mat = Child.Material or {}
+                local Rough = (type(Mat) == "table" and Mat.Roughness) or 0.5
+                local Refl = (type(Mat) == "table" and Mat.Reflectivity) or 0
+                local Trans = Child.Transparency or 0
+                local LockedBoost = (Child.Locked == true) and -10000 or 0
+                for SI = 1, PieceCount do
+                    local Sp = Child.SolidPieces[SI]
+                    if Sp and Sp.Position and Sp.Size then
+                        local P = Sp.Position
+                        local S = Sp.Size
+                        if type(P) == "table" and P.ToArray then P = P:ToArray() end
+                        if type(S) == "table" and S.ToArray then S = S:ToArray() end
+                        local Rx, Ry, Rz = RotLocal(P[1] or 0, P[2] or 0, P[3] or 0)
+                        local WPos = {Ux + Rx, Uy + Ry, Uz + Rz}
+                        local WSize = {math.abs(S[1] or 1), math.abs(S[2] or 1), math.abs(S[3] or 1)}
+                        local Dx = (WPos[1] or 0) - CamPos[1]
+                        local Dy = (WPos[2] or 0) - CamPos[2]
+                        local Dz = (WPos[3] or 0) - CamPos[3]
+                        local Dist = math.sqrt(Dx * Dx + Dy * Dy + Dz * Dz)
+                        local Extent = 0.5 * math.sqrt((WSize[1] or 1) ^ 2 + (WSize[2] or 1) ^ 2 + (WSize[3] or 1) ^ 2)
+                        local MaxDist = STREAM_BASE_DIST + Extent * 2.0
+                        if not (Dist > 8.0 and Dist - Extent > MaxDist) then
+                            table.insert(Candidates, {
+                                Position = WPos,
+                                Size = WSize,
+                                Orientation = {0, 0, 0},
+                                Color = C,
+                                HasDecal = 0,
+                                UvStuds = {16, 16},
+                                UvOffset = {0, 0},
+                                ColorTexIndex = 0,
+                                NormalTexIndex = 1,
+                                DecalTexIndex = 0,
+                                DecalColor = {1, 1, 1},
+                                DecalAlpha = 1,
+                                Roughness = Rough,
+                                Reflectivity = Refl,
+                                Refractivity = 0,
+                                Transparency = Trans,
+                                ShapeType = 0,
+                                IsHighlighted = 0,
+                                AlwaysOnTop = 0,
+                                Dist = Dist + LockedBoost,
+                            })
+                        end
+                    end
                 end
             end
-            Child.Position = SavedPos
-            Child.Size = SavedSize
-            Child.Orientation = SavedOri
             return
         end
             local PosRaw = Child.Position or Child:GetAttribute("Position")
@@ -332,10 +429,12 @@ function Pixel.Render(Camera)
             local Dy = (Pos[2] or 0) - CamPos[2]
             local Dz = (Pos[3] or 0) - CamPos[3]
             local Dist = math.sqrt(Dx * Dx + Dy * Dy + Dz * Dz)
-
+            if Child.Locked == true then
+                Dist = Dist - 10000
+            end
             local Extent = 0.5 * math.sqrt((Size[1] or 1) ^ 2 + (Size[2] or 1) ^ 2 + (Size[3] or 1) ^ 2)
             local MaxDist = STREAM_BASE_DIST + Extent * 2.0
-            if Dist > 4.0 and Dist - Extent > MaxDist then
+            if Dist > 8.0 and Dist - Extent > MaxDist and Child.Locked ~= true then
                 goto continue_part
             end
 
@@ -493,10 +592,18 @@ function Pixel.Render(Camera)
             end
 
             local RankDist = Dist - Extent
-            if Dist < 50 then
-                RankDist = RankDist - 1000
-            elseif Dist < 120 then
-                RankDist = RankDist - 200
+            if Dist < 30 then
+                RankDist = RankDist - 5000
+            elseif Dist < 80 then
+                RankDist = RankDist - 2000
+            elseif Dist < 150 then
+                RankDist = RankDist - 500
+            end
+            if IsHighlighted and IsHighlighted > 0 then
+                RankDist = RankDist - 10000
+            end
+            if _G.HoverPart == Child then
+                RankDist = RankDist - 8000
             end
 
             local Orient = GetOrientationRad(Child)
@@ -732,13 +839,50 @@ function Pixel.Render(Camera)
     end
 
     table.sort(Candidates, function(A, B)
-        return A.Dist < B.Dist
+        local da = A.Dist or 1e12
+        local db = B.Dist or 1e12
+        return da < db
     end)
 
-    for i = 1, math.min(STREAM_MAX, #Candidates) do
+    -- Hard cap total boxes across all multi-passes (24 per pass * 4 = 96)
+    local MaxTotal = STREAM_MAX
+    local CollectN = math.min(STREAM_COLLECT, MaxTotal, #Candidates)
+    for i = 1, CollectN do
         local C = Candidates[i]
-        C.Dist = nil
-        table.insert(Boxes, C)
+        if C then
+            C.Dist = nil
+            -- sanitize numeric fields so shader never receives nil/nan
+            local function Num3(T, Def)
+                if type(T) ~= "table" then return {Def, Def, Def} end
+                local a = tonumber(T[1]) or Def
+                local b = tonumber(T[2]) or Def
+                local c = tonumber(T[3]) or Def
+                if a ~= a then a = Def end
+                if b ~= b then b = Def end
+                if c ~= c then c = Def end
+                return {a, b, c}
+            end
+            C.Position = Num3(C.Position, 0)
+            C.Size = Num3(C.Size, 1)
+            C.Orientation = Num3(C.Orientation, 0)
+            C.Color = Num3(C.Color, 1)
+            C.Roughness = tonumber(C.Roughness) or 0.5
+            C.Reflectivity = tonumber(C.Reflectivity) or 0
+            C.Refractivity = tonumber(C.Refractivity) or 0
+            C.Transparency = tonumber(C.Transparency) or 0
+            C.HasDecal = tonumber(C.HasDecal) or 0
+            C.ColorTexIndex = tonumber(C.ColorTexIndex) or 0
+            C.NormalTexIndex = tonumber(C.NormalTexIndex) or 1
+            C.DecalTexIndex = tonumber(C.DecalTexIndex) or 0
+            C.ShapeType = tonumber(C.ShapeType) or 0
+            C.IsHighlighted = tonumber(C.IsHighlighted) or 0
+            C.AlwaysOnTop = tonumber(C.AlwaysOnTop) or 0
+            if type(C.UvStuds) ~= "table" then C.UvStuds = {16, 16} end
+            if type(C.UvOffset) ~= "table" then C.UvOffset = {0, 0} end
+            if type(C.DecalColor) ~= "table" then C.DecalColor = {1, 1, 1} end
+            C.DecalAlpha = tonumber(C.DecalAlpha) or 1
+            table.insert(Boxes, C)
+        end
     end
 
     
@@ -996,7 +1140,7 @@ function Pixel.Render(Camera)
     end
     if renderMode ~= ActiveRenderingMode then
         SelectSceneShader(renderMode)
-        print("[Pixel] Rendering mode Γò¼├┤Γö£├æΓö£├Ñ", ActiveRenderingMode)
+        print("[Pixel] Rendering mode ╬ô├▓┬╝Γö£Γöñ╬ô├╢┬úΓö£├ª╬ô├╢┬úΓö£├æ", ActiveRenderingMode)
     end
 
     
@@ -1011,7 +1155,9 @@ function Pixel.Render(Camera)
         CameraRight = Cf.Right,
         CameraUp = Cf.Up,
         Fov = Fov,
-        BoxCount = #Boxes,
+        BoxCount = math.min(STREAM_MAX, #Boxes),
+        PassIndex = 0,
+        FarPlane = STREAM_BASE_DIST,
         AdornCount = #AdornBoxes,
         LightCount = #Lights,
         ClockTime = ClockTime,
@@ -1031,32 +1177,44 @@ function Pixel.Render(Camera)
         PixelShader._Program:send("GlobalTextures", unpack(TextureSlots))
     end)
 
-    for i, Box in ipairs(Boxes) do
-        local Prefix = string.format("Boxes[%d].", i - 1)
-        PixelShader:Send({
-            [Prefix .. "Position"] = Box.Position,
-            [Prefix .. "Size"] = Box.Size,
-            [Prefix .. "Orientation"] = Box.Orientation,
-            [Prefix .. "Color"] = Box.Color,
-            [Prefix .. "HasDecal"] = Box.HasDecal,
-            [Prefix .. "UvStuds"] = Box.UvStuds,
-            [Prefix .. "UvOffset"] = Box.UvOffset or {0, 0},
-            [Prefix .. "ColorTexIndex"] = Box.ColorTexIndex,
-            [Prefix .. "NormalTexIndex"] = Box.NormalTexIndex,
-            [Prefix .. "DecalTexIndex"] = Box.DecalTexIndex,
-            [Prefix .. "DecalColor"] = Box.DecalColor,
-            [Prefix .. "DecalAlpha"] = Box.DecalAlpha or 1,
-            [Prefix .. "Roughness"] = Box.Roughness,
-            [Prefix .. "Reflectivity"] = Box.Reflectivity,
-            [Prefix .. "Refractivity"] = Box.Refractivity,
-            [Prefix .. "Transparency"] = Box.Transparency,
-            [Prefix .. "ShapeType"] = Box.ShapeType,
-            [Prefix .. "IsHighlighted"] = Box.IsHighlighted or 0,
-            [Prefix .. "AlwaysOnTop"] = Box.AlwaysOnTop or 0,
-            [Prefix .. "CastShadows"] = 1.0,
-            [Prefix .. "TriStart"] = Box.TriStart or -1,
-            [Prefix .. "TriCount"] = Box.TriCount or 0
-        })
+    do
+        local FirstN = math.min(STREAM_MAX, #Boxes)
+        for i = 1, FirstN do
+            local Box = Boxes[i]
+            local Prefix = string.format("Boxes[%d].", i - 1)
+            PixelShader:Send({
+                [Prefix .. "Position"] = Box.Position,
+                [Prefix .. "Size"] = Box.Size,
+                [Prefix .. "Orientation"] = Box.Orientation,
+                [Prefix .. "Color"] = Box.Color,
+                [Prefix .. "HasDecal"] = Box.HasDecal,
+                [Prefix .. "UvStuds"] = Box.UvStuds,
+                [Prefix .. "UvOffset"] = Box.UvOffset or {0, 0},
+                [Prefix .. "ColorTexIndex"] = Box.ColorTexIndex,
+                [Prefix .. "NormalTexIndex"] = Box.NormalTexIndex,
+                [Prefix .. "DecalTexIndex"] = Box.DecalTexIndex,
+                [Prefix .. "DecalColor"] = Box.DecalColor,
+                [Prefix .. "DecalAlpha"] = Box.DecalAlpha or 1,
+                [Prefix .. "Roughness"] = Box.Roughness,
+                [Prefix .. "Reflectivity"] = Box.Reflectivity,
+                [Prefix .. "Refractivity"] = Box.Refractivity,
+                [Prefix .. "Transparency"] = Box.Transparency,
+                [Prefix .. "ShapeType"] = Box.ShapeType,
+                [Prefix .. "IsHighlighted"] = Box.IsHighlighted or 0,
+                [Prefix .. "AlwaysOnTop"] = Box.AlwaysOnTop or 0,
+                [Prefix .. "CastShadows"] = 1.0,
+                [Prefix .. "TriStart"] = Box.TriStart or -1,
+                [Prefix .. "TriCount"] = Box.TriCount or 0
+            })
+        end
+        for i = FirstN + 1, STREAM_MAX do
+            local Prefix = string.format("Boxes[%d].", i - 1)
+            PixelShader:Send({
+                [Prefix .. "Position"] = {0, -9999, 0},
+                [Prefix .. "Size"] = {0, 0, 0},
+                [Prefix .. "Transparency"] = 1,
+            })
+        end
     end
 
     local TriPoolSend = Pixel._TriPool or {}
@@ -1122,13 +1280,142 @@ function Pixel.Render(Camera)
     end
 
     local Canvas = EnsureCanvas(Width, Height)
-    love.graphics.setCanvas(Canvas)
-    love.graphics.clear(0, 0, 0, 1)
-    love.graphics.rectangle("fill", 0, 0, Width, Height)
-    PixelShader:Unbind()
-    love.graphics.setCanvas()
+    local AllBoxes = Boxes
+    local BatchSize = STREAM_MAX
+    -- Single-pass only: GPU uniform limit is hard; multi-pass depth composite is unreliable on this GL path
+    if #AllBoxes > BatchSize then
+        local Trimmed = {}
+        for i = 1, BatchSize do Trimmed[i] = AllBoxes[i] end
+        AllBoxes = Trimmed
+    end
+    local PassCount = 1
 
-    
+    local function SendBoxSlot(Bi, Src)
+        local Prefix = string.format("Boxes[%d].", Bi)
+        if not Src then
+            pcall(function()
+                PixelShader:Send({
+                    [Prefix .. "Position"] = {0, -9999, 0},
+                    [Prefix .. "Size"] = {0, 0, 0},
+                    [Prefix .. "Orientation"] = {0, 0, 0},
+                    [Prefix .. "Color"] = {0, 0, 0},
+                    [Prefix .. "HasDecal"] = 0,
+                    [Prefix .. "UvStuds"] = {1, 1},
+                    [Prefix .. "UvOffset"] = {0, 0},
+                    [Prefix .. "ColorTexIndex"] = 0,
+                    [Prefix .. "NormalTexIndex"] = 0,
+                    [Prefix .. "DecalTexIndex"] = 0,
+                    [Prefix .. "DecalColor"] = {1, 1, 1},
+                    [Prefix .. "DecalAlpha"] = 0,
+                    [Prefix .. "Roughness"] = 1,
+                    [Prefix .. "Reflectivity"] = 0,
+                    [Prefix .. "Refractivity"] = 0,
+                    [Prefix .. "Transparency"] = 1,
+                    [Prefix .. "ShapeType"] = 0,
+                    [Prefix .. "IsHighlighted"] = 0,
+                    [Prefix .. "AlwaysOnTop"] = 0,
+                    [Prefix .. "CastShadows"] = 0,
+                    [Prefix .. "TriStart"] = -1,
+                    [Prefix .. "TriCount"] = 0,
+                })
+            end)
+            return
+        end
+        pcall(function()
+            PixelShader:Send({
+                [Prefix .. "Position"] = Src.Position,
+                [Prefix .. "Size"] = Src.Size,
+                [Prefix .. "Orientation"] = Src.Orientation,
+                [Prefix .. "Color"] = Src.Color,
+                [Prefix .. "HasDecal"] = Src.HasDecal or 0,
+                [Prefix .. "UvStuds"] = Src.UvStuds or {16, 16},
+                [Prefix .. "UvOffset"] = Src.UvOffset or {0, 0},
+                [Prefix .. "ColorTexIndex"] = Src.ColorTexIndex or 0,
+                [Prefix .. "NormalTexIndex"] = Src.NormalTexIndex or 1,
+                [Prefix .. "DecalTexIndex"] = Src.DecalTexIndex or 0,
+                [Prefix .. "DecalColor"] = Src.DecalColor or {1, 1, 1},
+                [Prefix .. "DecalAlpha"] = Src.DecalAlpha or 1,
+                [Prefix .. "Roughness"] = Src.Roughness or 0.5,
+                [Prefix .. "Reflectivity"] = Src.Reflectivity or 0,
+                [Prefix .. "Refractivity"] = Src.Refractivity or 0,
+                [Prefix .. "Transparency"] = Src.Transparency or 0,
+                [Prefix .. "ShapeType"] = Src.ShapeType or 0,
+                [Prefix .. "IsHighlighted"] = Src.IsHighlighted or 0,
+                [Prefix .. "AlwaysOnTop"] = Src.AlwaysOnTop or 0,
+                [Prefix .. "CastShadows"] = 1.0,
+                [Prefix .. "TriStart"] = Src.TriStart or -1,
+                [Prefix .. "TriCount"] = Src.TriCount or 0,
+            })
+        end)
+    end
+
+    local function DrawPass(PassIndex, StartI, Count, Target, PrevTex)
+        PixelShader:Bind()
+        for Bi = 0, BatchSize - 1 do
+            local Src = AllBoxes[StartI + Bi]
+            SendBoxSlot(Bi, Src)
+        end
+        pcall(function()
+            PixelShader:Send({
+                BoxCount = Count,
+                PassIndex = PassIndex,
+                FarPlane = STREAM_BASE_DIST,
+            })
+        end)
+        if PassIndex > 0 and PrevTex then
+            pcall(function()
+                PixelShader._Program:send("PrevPass", PrevTex)
+            end)
+        end
+        love.graphics.setCanvas(Target)
+        love.graphics.clear(0, 0, 0, 1)
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.rectangle("fill", 0, 0, Width, Height)
+        love.graphics.setCanvas()
+        PixelShader:Unbind()
+    end
+
+    -- Ensure secondary canvas for multi-pass
+    local Pong = Pixel._PassCanvas
+    if PassCount > 1 then
+        if not Pong or Pixel._PassW ~= Width or Pixel._PassH ~= Height then
+            local ok, c = pcall(love.graphics.newCanvas, Width, Height, {format = "rgba16f"})
+            if not ok then ok, c = pcall(love.graphics.newCanvas, Width, Height) end
+            Pong = c
+            if Pong then pcall(function() Pong:setFilter("linear", "linear") end) end
+            Pixel._PassCanvas = Pong
+            Pixel._PassW = Width
+            Pixel._PassH = Height
+        end
+    end
+
+    if PassCount <= 1 or not Pong or not Canvas then
+        -- Single chunk: only first STREAM_MAX boxes (already distance-sorted + Locked priority)
+        local Count = math.min(BatchSize, #AllBoxes)
+        DrawPass(0, 1, Count, Canvas, nil)
+    else
+        -- Chunked multi-pass: each pass ships at most STREAM_MAX boxes
+        local Ping = Canvas
+        for Pass = 0, PassCount - 1 do
+            local StartI = Pass * BatchSize + 1
+            local EndI = math.min(#AllBoxes, (Pass + 1) * BatchSize)
+            local Count = math.max(0, EndI - StartI + 1)
+            local Target = (Pass % 2 == 0) and Ping or Pong
+            local Prev = (Pass % 2 == 0) and Pong or Ping
+            if Pass == 0 then Prev = nil end
+            DrawPass(Pass, StartI, Count, Target, Prev)
+        end
+        local Final = ((PassCount - 1) % 2 == 0) and Ping or Pong
+        if Final and Final ~= Canvas then
+            love.graphics.setCanvas(Canvas)
+            love.graphics.clear(0, 0, 0, 1)
+            love.graphics.setShader()
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.draw(Final, 0, 0)
+            love.graphics.setCanvas()
+        end
+    end
+
     local CamPos = Cf.Position or {0, 0, 0}
     local CamFwd = Cf.Forward or {0, 0, 1}
     local motion = 0

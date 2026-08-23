@@ -57,31 +57,67 @@ local function CollectSelectedParts()
     return Parts
 end
 
+local function SnapshotPart_Color(Part)
+    local Col = Part.Color
+    if type(Col) == "table" then
+        return Col[1] or 0.64, Col[2] or 0.64, Col[3] or 0.64
+    end
+    return 0.64, 0.64, 0.64
+end
+
+local function DeepClone(Value)
+    if type(Value) ~= "table" then
+        return Value
+    end
+    if Value.ToArray then
+        local Arr = Value:ToArray()
+        return {Arr[1], Arr[2], Arr[3]}
+    end
+    local Copy = {}
+    for Key, Val in pairs(Value) do
+        Copy[Key] = DeepClone(Val)
+    end
+    return Copy
+end
+
 local function SnapshotPart(Part, Origin)
     Origin = Origin or {0, 0, 0}
-    if Part.IsA and Part:IsA("UnionOperation") and type(Part.SolidPieces) == "table" and #Part.SolidPieces > 0 then
-        local Pieces = {}
+    if Part.IsA and Part:IsA("UnionOperation") then
         local U = ToArr(Part.Position)
-        for I = 1, #Part.SolidPieces do
-            local Sp = Part.SolidPieces[I]
-            local P = ToArr(Sp.Position)
-            local S = ToArr(Sp.Size)
-            local Wx = U[1] + (P[1] or 0)
-            local Wy = U[2] + (P[2] or 0)
-            local Wz = U[3] + (P[3] or 0)
-            local Cr, Cg, Cb = SnapshotPart_Color(Part)
-            Pieces[#Pieces + 1] = {
-                ClassName = "Part",
-                Name = "Piece",
-                Position = {Wx - Origin[1], Wy - Origin[2], Wz - Origin[3]},
-                Size = {S[1], S[2], S[3]},
-                Orientation = {0, 0, 0},
-                Color = {Cr, Cg, Cb},
-                Anchored = true,
-                CanCollide = true,
-            }
+        local S = ToArr(Part.Size)
+        local O = ToArr(Part.Orientation)
+        local Cr, Cg, Cb = SnapshotPart_Color(Part)
+        local Solids = {}
+        if type(Part.SolidPieces) == "table" then
+            for I = 1, #Part.SolidPieces do
+                local Sp = Part.SolidPieces[I]
+                local P = ToArr(Sp.Position)
+                local Sz = ToArr(Sp.Size)
+                Solids[#Solids + 1] = {
+                    Position = {P[1], P[2], P[3]},
+                    Size = {Sz[1], Sz[2], Sz[3]},
+                }
+            end
         end
-        return { Kind = "pieces", Pieces = Pieces, Name = Part.Name }
+        local Operands = Part:GetAttribute("CSGOperands")
+        if type(Operands) ~= "table" then
+            Operands = {}
+        end
+        return {
+            Kind = "union",
+            ClassName = "UnionOperation",
+            Name = Part.Name or "Union",
+            Position = {U[1] - Origin[1], U[2] - Origin[2], U[3] - Origin[3]},
+            Size = {S[1], S[2], S[3]},
+            Orientation = {O[1], O[2], O[3]},
+            Color = {Cr, Cg, Cb},
+            Material = Part.Material,
+            Anchored = Part.Anchored ~= false,
+            CanCollide = Part.CanCollide ~= false,
+            Transparency = Part.Transparency or 0,
+            SolidPieces = Solids,
+            CSGOperands = DeepClone(Operands),
+        }
     end
 
     local P = ToArr(Part.Position)
@@ -104,15 +140,38 @@ local function SnapshotPart(Part, Origin)
     }
 end
 
-function SnapshotPart_Color(Part)
-    local Col = Part.Color
-    if type(Col) == "table" then
-        return Col[1] or 0.64, Col[2] or 0.64, Col[3] or 0.64
-    end
-    return 0.64, 0.64, 0.64
-end
-
 local function RestoreOperand(Data, Parent)
+    if not Data then return nil end
+    if Data.Kind == "union" then
+        local Union = Instance.new("UnionOperation", Parent)
+        Union.Name = Data.Name or "Union"
+        Union.Position = Vector3.new(Data.Position[1], Data.Position[2], Data.Position[3])
+        Union.Size = Vector3.new(Data.Size[1], Data.Size[2], Data.Size[3])
+        Union.Orientation = Vector3.new((Data.Orientation or {0, 0, 0})[1], (Data.Orientation or {0, 0, 0})[2], (Data.Orientation or {0, 0, 0})[3])
+        if Data.Color then
+            Union.Color = Color.Float(Data.Color[1], Data.Color[2], Data.Color[3], 1)
+        end
+        if Data.Material then Union.Material = Data.Material end
+        Union.Anchored = Data.Anchored ~= false
+        Union.CanCollide = Data.CanCollide ~= false
+        if Data.Transparency then Union.Transparency = Data.Transparency end
+        local Solids = {}
+        if type(Data.SolidPieces) == "table" then
+            for I = 1, #Data.SolidPieces do
+                local Sp = Data.SolidPieces[I]
+                Solids[#Solids + 1] = {
+                    Position = {Sp.Position[1], Sp.Position[2], Sp.Position[3]},
+                    Size = {Sp.Size[1], Sp.Size[2], Sp.Size[3]},
+                }
+            end
+        end
+        Union.SolidPieces = Solids
+        Union:SetAttribute("IsUnion", true)
+        if type(Data.CSGOperands) == "table" then
+            Union:SetAttribute("CSGOperands", DeepClone(Data.CSGOperands))
+        end
+        return Union
+    end
     if Data.Kind == "pieces" and Data.Pieces then
         local Restored = {}
         for I = 1, #Data.Pieces do
@@ -138,11 +197,12 @@ end
 
 local function ExpandToBoxes(Part, Into)
     if Part.IsA and Part:IsA("UnionOperation") and type(Part.SolidPieces) == "table" then
+        local U = ToArr(Part.Position)
         for I = 1, #Part.SolidPieces do
             local Sp = Part.SolidPieces[I]
             local P = ToArr(Sp.Position)
             local S = ToArr(Sp.Size)
-            Into[#Into + 1] = {P[1], P[2], P[3], math.abs(S[1]), math.abs(S[2]), math.abs(S[3])}
+            Into[#Into + 1] = {U[1] + P[1], U[2] + P[2], U[3] + P[3], math.abs(S[1]), math.abs(S[2]), math.abs(S[3])}
         end
         return
     end
@@ -337,8 +397,10 @@ function CSG:Union()
     end
 
     local Explorer = package.loaded["Services.Explorer"] or rawget(_G, "Explorer")
-    if Explorer and Explorer.SetSelection then
-        Explorer:SetSelection(Union, false)
+    if Explorer then
+        Explorer.SelectedSet = {[Union] = true}
+        Explorer.Selected = Union
+        if Explorer.OnSelect then Explorer.OnSelect(Explorer.Selected, Explorer.SelectedSet) end
         if Explorer.Refresh then Explorer:Refresh() end
     end
     local Visuals = package.loaded["Services.Visuals"] or rawget(_G, "Visuals")
