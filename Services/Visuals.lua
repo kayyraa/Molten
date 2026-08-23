@@ -106,7 +106,10 @@ local function Project(Camera, wx, wy, wz)
     if not Camera then return nil end
     local CamPos = Camera:GetAttribute("Position") or {0, 4, 0}
     local CamRot = Camera:GetAttribute("Rotation") or {0, 0, 0}
-    local Fov = Camera:GetAttribute("Fov") or (math.pi / 1.75)
+    local deg = rawget(Camera, "FieldOfView") or (Camera.GetAttribute and Camera:GetAttribute("FieldOfView")) or 70
+    if type(deg) == "number" and deg < 10 then deg = deg * (180 / math.pi) end
+    deg = math.max(45, math.min(135, tonumber(deg) or 70))
+    local Fov = deg * (math.pi / 180)
     local W, H = love.graphics.getDimensions()
     local Pitch, Yaw = CamRot[1] or 0, CamRot[2] or 0
     local Forward = {
@@ -207,10 +210,39 @@ function Visuals.Render(Camera)
 
     -- Selection / hover wire boxes (AlwaysOnTop overlay)
     local function drawSel(part, rr, gg, bb)
-        if not part or not part.IsA or not part:IsA("BasePart") then return end
-        local px, py, pz = ToPos3(part.Position)
-        local sx, sy, sz = ToPos3(part.Size)
-        DrawProjectedBox(Camera, px, py, pz, sx, sy, sz, rr, gg, bb, 0.95)
+        if not part then return end
+        local function DrawPart(P)
+            if not P or not P.IsA or not P:IsA("BasePart") then return end
+            local px, py, pz = ToPos3(P.Position)
+            local sx, sy, sz = ToPos3(P.Size)
+            DrawProjectedBox(Camera, px, py, pz, sx, sy, sz, rr, gg, bb, 0.95)
+        end
+        if part.IsA and part:IsA("UnionOperation") and type(rawget(part, "SolidPieces")) == "table" then
+            local Ux, Uy, Uz = ToPos3(part.Position)
+            for I = 1, #part.SolidPieces do
+                local Sp = part.SolidPieces[I]
+                if Sp then
+                    local lx, ly, lz = ToPos3(Sp.Position)
+                    local sx, sy, sz = ToPos3(Sp.Size)
+                    DrawProjectedBox(Camera, Ux + lx, Uy + ly, Uz + lz, sx, sy, sz, rr, gg, bb, 0.95)
+                end
+            end
+            return
+        end
+        if part.IsA and part:IsA("BasePart") then
+            DrawPart(part)
+            return
+        end
+        if part.IsA and part:IsA("Model") then
+            local function Walk(N)
+                if N.IsA and N:IsA("BasePart") then DrawPart(N) end
+                local Kids = rawget(N, "Children")
+                if Kids then
+                    for I = 1, #Kids do Walk(Kids[I]) end
+                end
+            end
+            Walk(part)
+        end
     end
 
     local sel = _G.Selection and _G.Selection.GetSelectedInstances and _G.Selection.GetSelectedInstances()

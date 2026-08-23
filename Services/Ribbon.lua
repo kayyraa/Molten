@@ -8,54 +8,102 @@ local Ribbon = {}
 Ribbon.ActiveTab = "Home"
 Ribbon.TabHeight = 28
 Ribbon.ToolbarHeight = 56
-Ribbon.TotalHeight = 28 + 56 -- tab strip + tool strip
+Ribbon.TotalHeight = 28 + 56
 
 local TabOrder = { "Home", "Model", "Testing", "View" }
 
 local TabMeta = {
     Home = {
-        label = "Home",
-        showTools = true,
-        groups = {
-            { name = "Clipboard", actions = { "Copy", "Paste", "Duplicate" } },
-            { name = "Tools", actions = { "Select", "Move", "Scale", "Rotate" } },
-            { name = "Insert", actions = { "Part" } },
+        Label = "Home",
+        ShowTools = true,
+        Groups = {
+            { Name = "Clipboard", Actions = { "Copy", "Paste", "Duplicate" } },
+            { Name = "Tools", Actions = { "Select", "Move", "Scale", "Rotate" } },
+            { Name = "Insert", Actions = { "Part" } },
         },
     },
     Model = {
-        label = "Model",
-        showTools = true,
-        groups = {
-            { name = "Tools", actions = { "Select", "Move", "Scale", "Rotate" } },
-            { name = "Pivot", actions = { "Pivot" } },
-            { name = "Solid Modeling", actions = { "Union", "Separate" } },
+        Label = "Model",
+        ShowTools = true,
+        Groups = {
+            { Name = "Tools", Actions = { "Select", "Move", "Scale", "Rotate" } },
+            { Name = "Pivot", Actions = { "Pivot" } },
+            { Name = "Solid Modeling", Actions = { "Union", "Separate" } },
         },
     },
     Testing = {
-        label = "Testing",
-        showTools = false,
-        groups = {
-            { name = "Simulation", actions = { "Play", "Run", "Stop" } },
-            { name = "Clients", actions = { "Client", "Server" } },
+        Label = "Testing",
+        ShowTools = false,
+        Groups = {
+            { Name = "Clients", Actions = { "Client", "Server" } },
         },
     },
     View = {
-        label = "View",
-        showTools = false,
-        groups = {
-            { name = "Windows", actions = { "Explorer", "Properties", "Output" } },
-            { name = "Display", actions = { "Grid", "Wireframe" } },
+        Label = "View",
+        ShowTools = false,
+        Groups = {
+            { Name = "Windows", Actions = { "Explorer", "Properties", "Output" } },
+            { Name = "Display", Actions = { "Grid", "Wireframe" } },
         },
     },
 }
 
+local MezzanineActions = { "Play", "PlayHere", "Run", "Pause", "Stop" }
+local MezzanineLabels = {
+    Play = "Play",
+    PlayHere = "Play Here",
+    Run = "Run",
+    Pause = "Pause",
+    Stop = "Stop",
+}
+
 local Frame
+local TabStrip
 local TabButtons = {}
 local ToolStrip
+local ContentHost
+local MezzanineStrip
 local ActionButtons = {}
+local MezzanineButtons = {}
 local OnAction = nil
+local UnderlineBar
 
--- Optional custom icons for any action (tools fall back to Tools.Images)
+local SlideX = 0
+local SlideTarget = 0
+local ContentAlpha = 1
+local UnderlineX = 2
+local UnderlineTargetX = 2
+local TabAnimColors = {}
+
+local function C(R, G, B, A)
+    return Color.FromRGBA(R, G, B, A)
+end
+
+local function ColIdle()
+    return C(50, 50, 54)
+end
+local function ColHover()
+    return C(65, 65, 72)
+end
+local function ColActive()
+    return C(53, 83, 143)
+end
+local function ColMezzIdle()
+    return C(40, 40, 46)
+end
+local function ColMezzHover()
+    return C(58, 70, 95)
+end
+local function ColTabIdle()
+    return C(35, 35, 38)
+end
+local function ColTabActive()
+    return C(45, 55, 75)
+end
+local function ColTabHover()
+    return C(48, 52, 62)
+end
+
 local ActionImages = {
     Select = "Assets/Decals/Select.png",
     Move = "Assets/Decals/Move.png",
@@ -63,238 +111,592 @@ local ActionImages = {
     Rotate = "Assets/Decals/Rotate.png",
 }
 
-function Ribbon:SetActionImage(action, path)
-    if action and path then
-        ActionImages[action] = path
-        if Tools and Tools.SetImage and (action == "Select" or action == "Move" or action == "Scale" or action == "Rotate") then
-            Tools:SetImage(action, path)
+local function TabIndex(Name)
+    for I, N in ipairs(TabOrder) do
+        if N == Name then
+            return I
+        end
+    end
+    return 1
+end
+
+local function Lerp(A, B, T)
+    return A + (B - A) * T
+end
+
+local function ExpAlpha(Speed, Dt)
+    return 1 - math.exp(-Speed * math.min(Dt or 0.016, 0.05))
+end
+
+function Ribbon:SetActionImage(Action, Path)
+    if Action and Path then
+        ActionImages[Action] = Path
+        if Tools and Tools.SetImage and (Action == "Select" or Action == "Move" or Action == "Scale" or Action == "Rotate") then
+            Tools:SetImage(Action, Path)
         end
         if self.ActiveTab then
-            self:RebuildToolbar()
+            self:RebuildToolbar(true)
         end
     end
 end
 
-function Ribbon:GetActionImage(action)
-    if ActionImages[action] then return ActionImages[action] end
-    if Tools and Tools.GetImage then return Tools:GetImage(action) end
+function Ribbon:GetActionImage(Action)
+    if ActionImages[Action] then
+        return ActionImages[Action]
+    end
+    if Tools and Tools.GetImage then
+        local P = Tools:GetImage(Action)
+        if P then
+            return P
+        end
+    end
     return nil
 end
 
+local function IsToolAction(Action)
+    return Action == "Select" or Action == "Move" or Action == "Scale" or Action == "Rotate"
+end
+
+local function CurrentTool()
+    if Tools and Tools.GetTool then
+        return Tools:GetTool()
+    end
+    return nil
+end
+
+local function UpdateUnderlineTarget()
+    local Btn = TabButtons[Ribbon.ActiveTab]
+    if Btn and Btn.Position and Btn.Position.X then
+        UnderlineTargetX = (Btn.Position.X.Offset or 0)
+    else
+        local Idx = TabIndex(Ribbon.ActiveTab)
+        UnderlineTargetX = 2 + (Idx - 1) * 76
+    end
+end
+
 local function SetTabVisuals()
-    for name, btn in pairs(TabButtons) do
-        if name == Ribbon.ActiveTab then
-            btn.BackgroundColor = Color.FromRGBA(45, 55, 75)
-            if btn.Underline then
-                btn.Underline.Visible = true
-            end
-        else
-            btn.BackgroundColor = Color.FromRGBA(35, 35, 38)
-            if btn.Underline then
-                btn.Underline.Visible = false
-            end
+    for Name, Btn in pairs(TabButtons) do
+        local Active = (Name == Ribbon.ActiveTab)
+        TabAnimColors[Name] = TabAnimColors[Name] or (Active and ColTabActive() or ColTabIdle())
+        if Btn.Underline then
+            Btn.Underline.Visible = false
         end
     end
+    UpdateUnderlineTarget()
 end
 
 function Ribbon:GetActiveTab()
     return self.ActiveTab
 end
 
-function Ribbon:Is(name)
-    return self.ActiveTab == name
+function Ribbon:Is(Name)
+    return self.ActiveTab == Name
 end
 
 function Ribbon:ShowsTools()
-    local meta = TabMeta[self.ActiveTab]
-    return meta and meta.showTools
+    local Meta = TabMeta[self.ActiveTab]
+    return Meta and Meta.ShowTools
 end
 
-function Ribbon:SetTab(name)
-    if not TabMeta[name] then
+function Ribbon:SetTab(Name)
+    if not TabMeta[Name] then
         return
     end
-    self.ActiveTab = name
-    SetTabVisuals()
-    self:RebuildToolbar()
-end
-
-function Ribbon:OnAction(cb)
-    OnAction = cb
-end
-
-local function FireAction(action)
-    if OnAction then
-        pcall(OnAction, action, Ribbon.ActiveTab)
+    if Name == self.ActiveTab then
+        return
     end
-    if action == "Select" or action == "Move" or action == "Scale" or action == "Rotate" then
+    local From = TabIndex(self.ActiveTab)
+    local To = TabIndex(Name)
+    local Dir = (To >= From) and 1 or -1
+    self.ActiveTab = Name
+    SlideX = Dir * 72
+    SlideTarget = 0
+    ContentAlpha = 1
+    SetTabVisuals()
+    self:RebuildToolbar(true)
+end
+
+function Ribbon:OnAction(Cb)
+    OnAction = Cb
+end
+
+local function FireAction(Action)
+    if OnAction then
+        pcall(OnAction, Action, Ribbon.ActiveTab)
+    end
+    if IsToolAction(Action) then
         if Tools and Tools.SetTool then
-            Tools:SetTool(action)
+            Tools:SetTool(Action)
+        end
+        for An, Ab in pairs(ActionButtons) do
+            if IsToolAction(An) then
+                local Sel = (An == Action)
+                rawset(Ab, "_Selected", Sel)
+                Ab.BackgroundColor = Sel and ColActive() or ColIdle()
+            end
+        end
+    end
+    if Action == "Play" or Action == "PlayHere" or Action == "Run" or Action == "Pause" or Action == "Stop" then
+        if Ribbon.RefreshMezzanine then
+            Ribbon:RefreshMezzanine()
         end
     end
 end
 
-function Ribbon:RebuildToolbar()
-    if not ToolStrip then
+function Ribbon:FireAction(Action)
+    FireAction(Action)
+end
+
+local function PulseButton(Btn)
+    if not Btn then
         return
     end
-    local kids = rawget(ToolStrip, "Children")
-    if kids then
-        for i = #kids, 1, -1 do
-            kids[i]:Destroy()
+    rawset(Btn, "_Pulse", 1)
+end
+
+function Ribbon:RefreshMezzanine()
+    local PauseBtn = MezzanineButtons["Pause"]
+    if not PauseBtn then
+        return
+    end
+    local Lab = nil
+    local Kids = rawget(PauseBtn, "Children")
+    if Kids then
+        for I = 1, #Kids do
+            if Kids[I].Name == "Label" then
+                Lab = Kids[I]
+                break
+            end
+        end
+    end
+    local Runtime = package.loaded["Services.Runtime"] or rawget(_G, "Runtime")
+    local Paused = Runtime and Runtime.IsPaused and Runtime:IsPaused()
+    local InSession = Runtime and not Runtime:IsEdit()
+    if Lab then
+        if InSession and Paused then
+            Lab.Text = "Resume"
+        else
+            Lab.Text = "Pause"
+        end
+    end
+end
+
+local function BuildMezzanine()
+    if not MezzanineStrip then
+        return
+    end
+    local Kids = rawget(MezzanineStrip, "Children")
+    if Kids then
+        for I = #Kids, 1, -1 do
+            if Kids[I] and Kids[I].Destroy then
+                Kids[I]:Destroy()
+            end
+        end
+    end
+    MezzanineButtons = {}
+
+    local Bx = 0
+    for _, Action in ipairs(MezzanineActions) do
+        local Btn = Instance.new("Frame", MezzanineStrip)
+        Btn.Name = "Mezz_" .. Action
+        Btn.Position = UDim.New(0, Bx, 0, 2)
+        Btn.Size = UDim.New(0, 72, 0, Ribbon.TabHeight - 4)
+        Btn.BackgroundColor = ColMezzIdle()
+        Btn.ZIndex = 5
+        Btn.MouseCursor = "hand"
+        rawset(Btn, "_BaseX", Bx)
+        rawset(Btn, "_BaseY", 2)
+        rawset(Btn, "_Pulse", 0)
+
+        local Lab = Instance.new("TextLabel", Btn)
+        Lab.Name = "Label"
+        Lab.Text = MezzanineLabels[Action] or Action
+        Lab.TextSize = 11
+        Lab.TextColor = Color.FromRGBA(200, 210, 230)
+        Lab.BackgroundColor = Color.FromRGBA(0, 0, 0, 0)
+        Lab.Position = UDim.FromScale(0, 0)
+        Lab.Size = UDim.FromScale(1, 1)
+        Lab.TextAlignment = { "Center", "Center" }
+        Lab.ZIndex = 6
+
+        local Act = Action
+        Btn.OnClick:Connect(function()
+            PulseButton(Btn)
+            FireAction(Act)
+            Ribbon:RefreshMezzanine()
+        end)
+        Btn.OnEnter:Connect(function()
+            rawset(Btn, "_IsHovered", true)
+            if (rawget(Btn, "_Pulse") or 0) <= 0 then
+                Btn.BackgroundColor = ColMezzHover()
+            end
+        end)
+        Btn.OnLeave:Connect(function()
+            rawset(Btn, "_IsHovered", false)
+            if (rawget(Btn, "_Pulse") or 0) <= 0 then
+                Btn.BackgroundColor = ColMezzIdle()
+            end
+        end)
+
+        MezzanineButtons[Action] = Btn
+        Bx = Bx + 76
+    end
+
+    local TotalW = Bx
+    MezzanineStrip.Size = UDim.New(0, TotalW, 1, 0)
+    MezzanineStrip.Position = UDim.New(1, -TotalW, 0, 0)
+    Ribbon:RefreshMezzanine()
+end
+
+function Ribbon:RebuildToolbar(Animated)
+    if not ContentHost then
+        return
+    end
+    local Kids = rawget(ContentHost, "Children")
+    if Kids then
+        for I = #Kids, 1, -1 do
+            if Kids[I] and Kids[I].Destroy then
+                Kids[I]:Destroy()
+            end
         end
     end
     ActionButtons = {}
 
-    local meta = TabMeta[self.ActiveTab]
-    if not meta then
+    local Meta = TabMeta[self.ActiveTab]
+    if not Meta then
         return
     end
 
-    local x = 8
-    for gi, group in ipairs(meta.groups or {}) do
-        local gl = Instance.new("TextLabel", ToolStrip)
-        gl.Name = "Group_" .. group.name
-        gl.Text = group.name
-        gl.TextSize = 11
-        gl.TextColor = Color.FromRGBA(160, 160, 170)
-        gl.BackgroundColor = Color.FromRGBA(0, 0, 0, 0)
-        gl.Position = UDim.New(0, x, 0, 0)
-        gl.Size = UDim.New(0, 200, 0, 13)
-        gl.TextAlignment = { "Left", "Center" }
+    local X = 8
+    local Stagger = 0
+    for Gi, Group in ipairs(Meta.Groups or {}) do
+        local Gl = Instance.new("TextLabel", ContentHost)
+        Gl.Name = "Group_" .. Group.Name
+        Gl.Text = Group.Name
+        Gl.TextSize = 11
+        Gl.TextColor = Color.FromRGBA(160, 160, 170)
+        Gl.BackgroundColor = Color.FromRGBA(0, 0, 0, 0)
+        Gl.Position = UDim.New(0, X, 0, 0)
+        Gl.Size = UDim.New(0, 200, 0, 13)
+        Gl.TextAlignment = { "Left", "Center" }
+        rawset(Gl, "_BaseX", X)
+        rawset(Gl, "_BaseY", 0)
+        rawset(Gl, "_Stagger", Stagger)
+        Stagger = Stagger + 1
 
-        local bx = x
-        for _, action in ipairs(group.actions or {}) do
-            local isTool = (action == "Select" or action == "Move" or action == "Scale" or action == "Rotate")
-            local iconPath = Ribbon:GetActionImage(action)
-            local btnW = isTool and 48 or 64
-            local btnH = 38
+        local Bx = X
+        for _, Action in ipairs(Group.Actions or {}) do
+            local ToolBtn = IsToolAction(Action)
+            local IconPath = Ribbon:GetActionImage(Action)
+            local BtnW = ToolBtn and 48 or 64
+            local BtnH = 38
+            local Selected = ToolBtn and CurrentTool() == Action
 
-            local btn = Instance.new("Frame", ToolStrip)
-            btn.Name = "Action_" .. action
-            btn.Position = UDim.New(0, bx, 0, 14)
-            btn.Size = UDim.FromOffset(btnW, btnH)
-            btn.BackgroundColor = Color.FromRGBA(50, 50, 54)
-            btn.ZIndex = 2
+            local Btn = Instance.new("Frame", ContentHost)
+            Btn.Name = "Action_" .. Action
+            Btn.Position = UDim.New(0, Bx, 0, 14)
+            Btn.Size = UDim.FromOffset(BtnW, BtnH)
+            Btn.BackgroundColor = Selected and ColActive() or ColIdle()
+            Btn.ZIndex = 2
+            Btn.MouseCursor = "hand"
+            rawset(Btn, "_BaseX", Bx)
+            rawset(Btn, "_BaseY", 14)
+            rawset(Btn, "_Stagger", Stagger)
+            rawset(Btn, "_Pulse", 0)
+            rawset(Btn, "_BtnW", BtnW)
+            rawset(Btn, "_BtnH", BtnH)
+            rawset(Btn, "_IsTool", ToolBtn and true or false)
+            rawset(Btn, "_Action", Action)
+            rawset(Btn, "_Selected", Selected and true or false)
+            Stagger = Stagger + 1
 
-            if iconPath then
-                local icon = Instance.new("ImageLabel", btn)
-                icon.Name = "Icon"
-                icon.Image = iconPath
-                icon.Anchor = {0.5, 0}
-                icon.Position = UDim.New(0.5, 0, 0, 2)
-                icon.Size = UDim.FromOffset(22, 22)
-                icon.BackgroundColor = Color.FromRGBA(0, 0, 0, 0)
-                icon.ZIndex = 3
+            if IconPath then
+                local Icon = Instance.new("ImageLabel", Btn)
+                Icon.Name = "Icon"
+                Icon.Image = IconPath
+                Icon.Anchor = {0.5, 0}
+                Icon.Position = UDim.New(0.5, 0, 0, 2)
+                Icon.Size = UDim.FromOffset(22, 22)
+                Icon.BackgroundColor = Color.FromRGBA(0, 0, 0, 0)
+                Icon.ZIndex = 3
 
-                local label = Instance.new("TextLabel", btn)
-                label.Name = "Label"
-                label.Text = action
-                label.TextSize = 10
-                label.TextColor = Color.FromRGBA(200, 200, 210)
-                label.BackgroundColor = Color.FromRGBA(0, 0, 0, 0)
-                label.Position = UDim.New(0, 0, 1, -14)
-                label.Size = UDim.New(1, 0, 0, 12)
-                label.TextAlignment = { "Center", "Center" }
+                local Label = Instance.new("TextLabel", Btn)
+                Label.Name = "Label"
+                Label.Text = Action
+                Label.TextSize = 10
+                Label.TextColor = Color.FromRGBA(200, 200, 210)
+                Label.BackgroundColor = Color.FromRGBA(0, 0, 0, 0)
+                Label.Position = UDim.New(0, 0, 1, -14)
+                Label.Size = UDim.New(1, 0, 0, 12)
+                Label.TextAlignment = { "Center", "Center" }
+                Label.ZIndex = 3
             else
-                local label = Instance.new("TextLabel", btn)
-                label.Name = "Label"
-                label.Text = action
-                label.TextSize = 11
-                label.TextColor = Color.FromRGBA(220, 220, 225)
-                label.BackgroundColor = Color.FromRGBA(0, 0, 0, 0)
-                label.Position = UDim.FromScale(0, 0)
-                label.Size = UDim.FromScale(1, 1)
-                label.TextAlignment = { "Center", "Center" }
+                local Label = Instance.new("TextLabel", Btn)
+                Label.Name = "Label"
+                Label.Text = Action
+                Label.TextSize = 11
+                Label.TextColor = Color.FromRGBA(220, 220, 225)
+                Label.BackgroundColor = Color.FromRGBA(0, 0, 0, 0)
+                Label.Position = UDim.FromScale(0, 0)
+                Label.Size = UDim.FromScale(1, 1)
+                Label.TextAlignment = { "Center", "Center" }
+                Label.ZIndex = 3
             end
 
-            if isTool and Tools and Tools.GetTool and Tools:GetTool() == action then
-                btn.BackgroundColor = Color.FromRGBA(53, 83, 143)
-            end
-
-            btn.OnClick:Connect(function()
-                FireAction(action)
-                if isTool then
-                    for an, ab in pairs(ActionButtons) do
-                        if an == "Select" or an == "Move" or an == "Scale" or an == "Rotate" then
-                            ab.BackgroundColor = (an == action) and Color.FromRGBA(53, 83, 143) or Color.FromRGBA(50, 50, 54)
-                        end
+            local Act = Action
+            Btn.OnClick:Connect(function()
+                PulseButton(Btn)
+                FireAction(Act)
+                if ToolBtn then
+                    for An, Ab in pairs(ActionButtons) do
+                        local Sel = IsToolAction(An) and (CurrentTool() == An)
+                        rawset(Ab, "_Selected", Sel)
+                        Ab.BackgroundColor = Sel and ColActive() or ColIdle()
                     end
                 end
             end)
-
-            btn.OnEnter:Connect(function()
-                if not (isTool and Tools and Tools:GetTool() == action) then
-                    btn.BackgroundColor = Color.FromRGBA(65, 65, 72)
-                end
+            Btn.OnEnter:Connect(function()
+                rawset(Btn, "_IsHovered", true)
             end)
-            btn.OnLeave:Connect(function()
-                if isTool and Tools and Tools:GetTool() == action then
-                    btn.BackgroundColor = Color.FromRGBA(53, 83, 143)
-                else
-                    btn.BackgroundColor = Color.FromRGBA(50, 50, 54)
-                end
+            Btn.OnLeave:Connect(function()
+                rawset(Btn, "_IsHovered", false)
             end)
 
-            ActionButtons[action] = btn
-            bx = bx + (isTool and 52 or 68)
+            ActionButtons[Action] = Btn
+            Bx = Bx + (ToolBtn and 52 or 68)
         end
 
-        x = bx + 8
-        if gi ~= #meta.groups then
-            local sep = Instance.new("Frame", ToolStrip)
-            sep.Name = "Sep"
-            sep.BackgroundColor = Color.FromRGBA(70, 70, 75)
-            sep.Position = UDim.New(0, x - 6, 0, 18)
-            sep.Size = UDim.New(0, 1, 0, 28)
+        X = Bx + 8
+        if Gi ~= #Meta.Groups then
+            local Sep = Instance.new("Frame", ContentHost)
+            Sep.Name = "Sep"
+            Sep.BackgroundColor = Color.FromRGBA(70, 70, 75)
+            Sep.Position = UDim.New(0, X - 6, 0, 18)
+            Sep.Size = UDim.New(0, 1, 0, 28)
+            rawset(Sep, "_BaseX", X - 6)
+            rawset(Sep, "_BaseY", 18)
+            rawset(Sep, "_Stagger", Stagger)
+            Stagger = Stagger + 1
+        end
+    end
+
+    if not Animated then
+        SlideX = 0
+        ContentAlpha = 1
+    end
+    self:ApplySlide()
+end
+
+function Ribbon:ApplySlide()
+    if not ContentHost then
+        return
+    end
+    local Kids = rawget(ContentHost, "Children")
+    if not Kids then
+        return
+    end
+    for I = 1, #Kids do
+        local Child = Kids[I]
+        local Bx = rawget(Child, "_BaseX")
+        local By = rawget(Child, "_BaseY")
+        if Bx ~= nil and By ~= nil then
+            local St = rawget(Child, "_Stagger") or 0
+            local Extra = SlideX * (1 + St * 0.035)
+            local Bw = rawget(Child, "_BtnW")
+            local Bh = rawget(Child, "_BtnH")
+            local Pulse = rawget(Child, "_Pulse") or 0
+            if Bw and Bh then
+                if Pulse > 0 then
+                    local S = 1 - Pulse * 0.06
+                    local Nw = math.floor(Bw * S + 0.5)
+                    local Nh = math.floor(Bh * S + 0.5)
+                    Child.Size = UDim.FromOffset(Nw, Nh)
+                    Child.Position = UDim.New(0, math.floor(Bx + Extra + (Bw - Nw) * 0.5 + 0.5), 0, math.floor(By + (Bh - Nh) * 0.5 + 0.5))
+                else
+                    Child.Size = UDim.FromOffset(Bw, Bh)
+                    Child.Position = UDim.New(0, math.floor(Bx + Extra + 0.5), 0, By)
+                end
+            else
+                Child.Position = UDim.New(0, math.floor(Bx + Extra + 0.5), 0, By)
+            end
         end
     end
 end
 
-function Ribbon:Init(parentFrame)
-    Frame = parentFrame
+function Ribbon:SyncToolColors()
+    local CurTool = CurrentTool()
+    for An, Ab in pairs(ActionButtons) do
+        if rawget(Ab, "_IsTool") then
+            local Sel = (CurTool == An)
+            rawset(Ab, "_Selected", Sel)
+            if Sel then
+                Ab.BackgroundColor = ColActive()
+            elseif rawget(Ab, "_IsHovered") then
+                Ab.BackgroundColor = ColHover()
+            else
+                Ab.BackgroundColor = ColIdle()
+            end
+        end
+    end
+end
+
+function Ribbon:Tick(Dt)
+    Dt = math.min(Dt or 0.016, 0.05)
+    local T = ExpAlpha(18, Dt)
+    SlideX = Lerp(SlideX, SlideTarget, T)
+    if math.abs(SlideX - SlideTarget) < 0.2 then
+        SlideX = SlideTarget
+    end
+    ContentAlpha = 1
+
+    UnderlineX = Lerp(UnderlineX, UnderlineTargetX, ExpAlpha(18, Dt))
+    if UnderlineBar then
+        UnderlineBar.Position = UDim.New(0, math.floor(UnderlineX + 0.5), 1, -2)
+    end
+
+    for Name, Btn in pairs(TabButtons) do
+        local Target = (Name == self.ActiveTab) and ColTabActive() or ColTabIdle()
+        local Cur = TabAnimColors[Name] or Target
+        local A = ExpAlpha(14, Dt)
+        local Next = {
+            Lerp(Cur[1] or 0, Target[1] or 0, A),
+            Lerp(Cur[2] or 0, Target[2] or 0, A),
+            Lerp(Cur[3] or 0, Target[3] or 0, A),
+            Lerp(Cur[4] or 1, Target[4] or 1, A),
+        }
+        TabAnimColors[Name] = Next
+        if rawget(Btn, "_IsHovered") and Name ~= self.ActiveTab then
+            Btn.BackgroundColor = ColTabHover()
+        else
+            Btn.BackgroundColor = Next
+        end
+    end
+
+    local function DecayPulse(Map)
+        for _, Btn in pairs(Map) do
+            local P = rawget(Btn, "_Pulse") or 0
+            if P > 0 then
+                P = P - Dt * 8
+                if P < 0 then
+                    P = 0
+                end
+                rawset(Btn, "_Pulse", P)
+            end
+        end
+    end
+    DecayPulse(ActionButtons)
+    DecayPulse(MezzanineButtons)
+
+    self:SyncToolColors()
+
+    for _, Btn in pairs(MezzanineButtons) do
+        local P = rawget(Btn, "_Pulse") or 0
+        local Bx = rawget(Btn, "_BaseX") or 0
+        local By = rawget(Btn, "_BaseY") or 2
+        if P > 0 then
+            local S = 1 - P * 0.08
+            local Nw = math.floor(72 * S + 0.5)
+            local Nh = math.floor((Ribbon.TabHeight - 4) * S + 0.5)
+            Btn.Size = UDim.FromOffset(Nw, Nh)
+            Btn.Position = UDim.New(0, math.floor(Bx + (72 - Nw) * 0.5 + 0.5), 0, math.floor(By + ((Ribbon.TabHeight - 4) - Nh) * 0.5 + 0.5))
+            Btn.BackgroundColor = ColMezzHover()
+        else
+            Btn.Size = UDim.New(0, 72, 0, Ribbon.TabHeight - 4)
+            Btn.Position = UDim.New(0, Bx, 0, By)
+            if rawget(Btn, "_IsHovered") then
+                Btn.BackgroundColor = ColMezzHover()
+            else
+                Btn.BackgroundColor = ColMezzIdle()
+            end
+        end
+    end
+
+    self:ApplySlide()
+end
+
+function Ribbon:Init(ParentFrame)
+    Frame = ParentFrame
     Frame.BackgroundColor = Color.FromRGBA(32, 32, 35)
 
-    local tabStrip = Instance.new("Frame", Frame)
-    tabStrip.Name = "TabStrip"
-    tabStrip.BackgroundColor = Color.FromRGBA(28, 28, 30)
-    tabStrip.Position = UDim.New(0, 0, 0, 0)
-    tabStrip.Size = UDim.New(1, 0, 0, self.TabHeight)
+    TabStrip = Instance.new("Frame", Frame)
+    TabStrip.Name = "TabStrip"
+    TabStrip.BackgroundColor = Color.FromRGBA(28, 28, 30)
+    TabStrip.Position = UDim.New(0, 0, 0, 0)
+    TabStrip.Size = UDim.New(1, 0, 0, self.TabHeight)
+    TabStrip.ZIndex = 2
 
-    local tx = 2
-    for _, name in ipairs(TabOrder) do
-        local btn = Instance.new("Frame", tabStrip)
-        btn.Name = "Tab_" .. name
-        btn.Position = UDim.New(0, tx, 0, 2)
-        btn.Size = UDim.New(0, 72, 0, self.TabHeight - 4)
-        btn.BackgroundColor = Color.FromRGBA(35, 35, 38)
-        btn.ZIndex = 2
+    local Tx = 2
+    for _, Name in ipairs(TabOrder) do
+        local Btn = Instance.new("Frame", TabStrip)
+        Btn.Name = "Tab_" .. Name
+        Btn.Position = UDim.New(0, Tx, 0, 2)
+        Btn.Size = UDim.New(0, 72, 0, self.TabHeight - 4)
+        Btn.BackgroundColor = ColTabIdle()
+        Btn.ZIndex = 3
+        Btn.MouseCursor = "hand"
+        TabAnimColors[Name] = ColTabIdle()
 
-        local lab = Instance.new("TextLabel", btn)
-        lab.Text = name
-        lab.TextSize = 12
-        lab.TextColor = Color.FromRGBA(210, 210, 220)
-        lab.BackgroundColor = Color.FromRGBA(0, 0, 0, 0)
-        lab.Position = UDim.FromScale(0, 0)
-        lab.Size = UDim.FromScale(1, 1)
-        lab.TextAlignment = { "Center", "Center" }
+        local Lab = Instance.new("TextLabel", Btn)
+        Lab.Text = Name
+        Lab.TextSize = 12
+        Lab.TextColor = Color.FromRGBA(210, 210, 220)
+        Lab.BackgroundColor = Color.FromRGBA(0, 0, 0, 0)
+        Lab.Position = UDim.FromScale(0, 0)
+        Lab.Size = UDim.FromScale(1, 1)
+        Lab.TextAlignment = { "Center", "Center" }
+        Lab.ZIndex = 4
 
-        local under = Instance.new("Frame", btn)
-        under.Name = "Underline"
-        under.BackgroundColor = Color.FromRGBA(80, 140, 255)
-        under.Position = UDim.New(0, 0, 1, -2)
-        under.Size = UDim.New(1, 0, 0, 2)
-        under.Visible = false
-        btn.Underline = under
+        local Under = Instance.new("Frame", Btn)
+        Under.Name = "Underline"
+        Under.BackgroundColor = Color.FromRGBA(80, 140, 255)
+        Under.Position = UDim.New(0, 0, 1, -2)
+        Under.Size = UDim.New(1, 0, 0, 2)
+        Under.Visible = false
+        Under.ZIndex = 5
+        Btn.Underline = Under
 
-        local tabName = name
-        btn.OnClick:Connect(function()
-            Ribbon:SetTab(tabName)
+        local TabName = Name
+        Btn.OnClick:Connect(function()
+            Ribbon:SetTab(TabName)
+        end)
+        Btn.OnEnter:Connect(function()
+            rawset(Btn, "_IsHovered", true)
+            if Ribbon.ActiveTab == TabName then
+                Btn.BackgroundColor = ColTabActive()
+            else
+                Btn.BackgroundColor = ColTabHover()
+            end
+        end)
+        Btn.OnLeave:Connect(function()
+            rawset(Btn, "_IsHovered", false)
+            if Ribbon.ActiveTab == TabName then
+                Btn.BackgroundColor = ColTabActive()
+                TabAnimColors[TabName] = ColTabActive()
+            else
+                Btn.BackgroundColor = ColTabIdle()
+                TabAnimColors[TabName] = ColTabIdle()
+            end
         end)
 
-        TabButtons[name] = btn
-        tx = tx + 76
+        TabButtons[Name] = Btn
+        Tx = Tx + 76
     end
+
+    UnderlineBar = Instance.new("Frame", TabStrip)
+    UnderlineBar.Name = "ActiveUnderline"
+    UnderlineBar.BackgroundColor = Color.FromRGBA(80, 140, 255)
+    UnderlineBar.Position = UDim.New(0, 2, 1, -2)
+    UnderlineBar.Size = UDim.New(0, 72, 0, 2)
+    UnderlineBar.ZIndex = 6
+
+    local MezzW = 76 * #MezzanineActions
+    MezzanineStrip = Instance.new("Frame", TabStrip)
+    MezzanineStrip.Name = "Mezzanine"
+    MezzanineStrip.BackgroundColor = Color.FromRGBA(0, 0, 0, 0)
+    MezzanineStrip.Position = UDim.New(1, -MezzW, 0, 0)
+    MezzanineStrip.Size = UDim.New(0, MezzW, 1, 0)
+    MezzanineStrip.ZIndex = 4
+    BuildMezzanine()
 
     ToolStrip = Instance.new("Frame", Frame)
     ToolStrip.Name = "ToolStrip"
@@ -302,12 +704,22 @@ function Ribbon:Init(parentFrame)
     ToolStrip.Position = UDim.New(0, 0, 0, self.TabHeight)
     ToolStrip.Size = UDim.New(1, 0, 0, self.ToolbarHeight)
     ToolStrip.ClipsDescendants = true
+    ToolStrip.ZIndex = 2
+
+    ContentHost = Instance.new("Frame", ToolStrip)
+    ContentHost.Name = "ContentHost"
+    ContentHost.BackgroundColor = Color.FromRGBA(0, 0, 0, 0)
+    ContentHost.Position = UDim.New(0, 0, 0, 0)
+    ContentHost.Size = UDim.New(1, 0, 1, 0)
+    ContentHost.ClipsDescendants = true
+    ContentHost.ZIndex = 2
 
     SetTabVisuals()
-    self:RebuildToolbar()
+    UnderlineX = UnderlineTargetX
+    self:RebuildToolbar(false)
 end
 
-function Ribbon:HandleClick(mx, my)
+function Ribbon:HandleClick(Mx, My)
     return false
 end
 

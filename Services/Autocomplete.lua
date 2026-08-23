@@ -1,12 +1,5 @@
--- Services/Autocomplete.lua
--- Static knowledge of Molten's global API + Luau/Lua stdlib, used to power
--- the script editor's autocomplete popup. Kept data-only and separate from
--- ScriptEditor so it's easy to extend as the engine grows.
-
 local Autocomplete = {}
 
--- Kind is used only for icon/coloring in the popup: "class", "function",
--- "property", "keyword", "enum", "local"
 local function Members(List)
     local Map = {}
     for _, Entry in ipairs(List) do
@@ -14,10 +7,6 @@ local function Members(List)
     end
     return Map
 end
-
--- ---------------------------------------------------------------------------
--- Top-level globals available in Molten scripts
--- ---------------------------------------------------------------------------
 
 Autocomplete.Globals = {
     {Name = "game", Kind = "class", Detail = "DataModel"},
@@ -96,10 +85,6 @@ Autocomplete.Globals = {
     {Name = "while", Kind = "keyword"},
     {Name = "continue", Kind = "keyword"},
 }
-
--- ---------------------------------------------------------------------------
--- Members for "Global." completion, keyed by the exact global name above
--- ---------------------------------------------------------------------------
 
 Autocomplete.Members = {
     Vector3 = Members({
@@ -237,9 +222,9 @@ Autocomplete.Members = {
         {Name = "clock", Kind = "function"}, {Name = "difftime", Kind = "function"},
     }),
 
-    -- Members shared by any instance-like value (Part, Model, Folder, etc).
-    -- Used as a fallback when the receiver's exact class isn't known but it
-    -- looks like an Instance (came from Instance.new(...) etc).
+    
+    
+    
     ["*Instance"] = Members({
         {Name = "Name", Kind = "property"},
         {Name = "ClassName", Kind = "property"},
@@ -264,14 +249,19 @@ Autocomplete.Members = {
         {Name = "Anchored", Kind = "property", Detail = "boolean"},
         {Name = "Transparency", Kind = "property", Detail = "number"},
         {Name = "Locked", Kind = "property", Detail = "boolean"},
+        {Name = "CanCollide", Kind = "property", Detail = "boolean"},
+        {Name = "CanTouch", Kind = "property", Detail = "boolean"},
+        {Name = "CollisionGroup", Kind = "property", Detail = "string"},
+        {Name = "CollisionFidelity", Kind = "property"},
+        {Name = "AssemblyLinearVelocity", Kind = "property", Detail = "Vector3"},
+        {Name = "Touched", Kind = "property", Detail = "Signal"},
+        {Name = "TouchEnded", Kind = "property", Detail = "Signal"},
         {Name = "Shape", Kind = "property"},
     }),
 }
 
--- Known instance-producing class names (used to know when a `local X =
--- Instance.new("Part")` should get BasePart-flavored member completions).
 Autocomplete.BasePartClasses = {
-    Part = true, WedgePart = true, CornerWedgePart = true, MeshPart = true,
+    Part = true, WedgePart = true, CornerWedgePart = true, MeshPart = true, SpawnLocation = true,
 }
 
 return Autocomplete

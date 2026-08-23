@@ -72,6 +72,12 @@ Enum.HighlightDepthMode = {
     Occluded = "Occluded",
 }
 
+Enum.CollisionFidelity = {
+    Default = "Default",
+    Hull = "Hull",
+    Box = "Box",
+}
+
 Enum.HandleAdornmentShape = {
     Cone = "Cone",
     Sphere = "Sphere",

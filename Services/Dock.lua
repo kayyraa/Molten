@@ -1,119 +1,245 @@
+local Theme = _G.Theme or require("Services.Theme")
+local UDim = require("Services.UDim")
 local Dock = {}
 
-local SplitterW = 4
+local SplitterW = 1
+local HitPad = 3
 local MinSide = 120
 local MinCenterW = 200
 local MinCenterH = 120
 local MinTop = 40
 local MinBottom = 0
 
--- Layout state (pixels)
 Dock.TopH = 84
-Dock.BottomH = 0
+Dock.BottomH = 22
+Dock.OutputH = 0
+Dock.AnimOutputH = 0
+Dock.TargetOutputH = 0
+Dock.TweenSpeed = 14
 Dock.LeftW = 0
 Dock.RightW = 256
 
--- Right column internal split: fraction of right-dock height given to Explorer
--- (rest goes to Properties). 0.55 ≈ Studio default.
 Dock.RightSplit = 0.55
 Dock.MinRightPane = 80
 
--- Active drag: "left" | "right" | "top" | "bottom" | "rightSplit" | nil
+Dock.PanelVisible = {
+    RightTop = true,
+    RightBottom = true,
+    Left = false,
+    Bottom = true,
+    Output = false,
+}
+
+Dock.Floating = {}
+
 local Drag = nil
 local DragStart = 0
 local DragStartSize = 0
+local FloatDrag = nil
 
--- Registered content frames (optional; Dock only computes rects)
 local Content = {
     Top = nil,
     Bottom = nil,
+    Output = nil,
     Left = nil,
-    RightTop = nil,    -- Explorer
-    RightBottom = nil, -- Properties
+    RightTop = nil,
+    RightBottom = nil,
     Center = nil,
 }
 
-function Dock:SetContent(slot, frame)
-    if Content[slot] ~= nil or frame then
-        Content[slot] = frame
+function Dock:SetContent(Slot, Frame)
+    if Content[Slot] ~= nil or Frame then
+        Content[Slot] = Frame
     end
 end
 
-function Dock:GetContent(slot)
-    return Content[slot]
+function Dock:GetContent(Slot)
+    return Content[Slot]
 end
-
--- ---------------------------------------------------------------------------
--- Geometry
--- ---------------------------------------------------------------------------
 
 function Dock:GetScreenSize()
     return love.graphics.getDimensions()
 end
 
---- Returns absolute pixel rects for every region.
---- Each rect is { X, Y, W, H }
+function Dock:IsPanelVisible(Slot)
+    if self.Floating[Slot] then
+        return true
+    end
+    if Slot == "Output" then
+        return self.PanelVisible.Output == true
+    end
+    return self.PanelVisible[Slot] ~= false
+end
+
+function Dock:SetPanelVisible(Slot, Visible)
+    self.PanelVisible[Slot] = Visible and true or false
+    if not Visible then
+        self.Floating[Slot] = nil
+    end
+    if Slot == "Output" then
+        if Visible then
+            if (self.TargetOutputH or 0) < 80 then
+                self.TargetOutputH = 180
+            end
+            self.OutputH = self.TargetOutputH
+        else
+            self.TargetOutputH = 0
+            self.OutputH = 0
+        end
+    end
+    self:SyncRightWidth()
+end
+
+function Dock:TogglePanel(Slot)
+    if self.Floating[Slot] then
+        self.Floating[Slot] = nil
+        self.PanelVisible[Slot] = true
+        self:SyncRightWidth()
+        return
+    end
+    if Slot == "Output" then
+        local Vis = self.PanelVisible.Output == true
+        self.PanelVisible.Output = not Vis
+        if self.PanelVisible.Output then
+            if (self.TargetOutputH or 0) < 80 then
+                self.TargetOutputH = 180
+            end
+            self.OutputH = self.TargetOutputH
+        else
+            self.TargetOutputH = 0
+            self.OutputH = 0
+        end
+        return
+    end
+    local Vis = self.PanelVisible[Slot] ~= false
+    self.PanelVisible[Slot] = not Vis
+    self:SyncRightWidth()
+end
+
+function Dock:FloatPanel(Slot, X, Y, W, H)
+    local Frame = Content[Slot]
+    if not Frame then return end
+    local SW, SH = self:GetScreenSize()
+    W = W or 280
+    H = H or 320
+    X = math.max(0, math.min(X or 80, SW - 40))
+    Y = math.max(0, math.min(Y or 80, SH - 40))
+    self.Floating[Slot] = {
+        X = X,
+        Y = Y,
+        W = W,
+        H = H,
+    }
+    self.PanelVisible[Slot] = false
+    self:SyncRightWidth()
+end
+
+function Dock:DockPanel(Slot)
+    if self.Floating[Slot] then
+        self.Floating[Slot] = nil
+        self.PanelVisible[Slot] = true
+        self:SyncRightWidth()
+    end
+end
+
+function Dock:SyncRightWidth()
+    local TopVis = self.PanelVisible.RightTop ~= false and not self.Floating.RightTop
+    local BotVis = self.PanelVisible.RightBottom ~= false and not self.Floating.RightBottom
+    if not TopVis and not BotVis then
+        if self._SavedRightW == nil then
+            self._SavedRightW = self.RightW
+        end
+        self.RightW = 0
+    else
+        if self.RightW <= 0 then
+            self.RightW = self._SavedRightW or 256
+        end
+        self._SavedRightW = self.RightW
+    end
+end
+
 function Dock:GetLayout()
     local SW, SH = self:GetScreenSize()
 
-    local topH = math.max(MinTop, math.min(self.TopH, SH - MinCenterH - self.BottomH))
-    local botH = math.max(MinBottom, math.min(self.BottomH, SH - topH - MinCenterH))
-    local leftW = math.max(0, math.min(self.LeftW, SW - MinCenterW - self.RightW - SplitterW * 2))
-    local rightW = math.max(0, math.min(self.RightW, SW - MinCenterW - leftW - SplitterW * 2))
+    local BotH = math.max(MinBottom, math.min(self.BottomH, 40))
+    if self.PanelVisible.Bottom == false then
+        BotH = 0
+    end
+    local OutH = math.max(0, math.min(self.AnimOutputH or self.OutputH or 0, SH - MinCenterH - BotH - MinTop))
+    if OutH < 1 then OutH = 0 end
+    local TopH = math.max(MinTop, math.min(self.TopH, SH - MinCenterH - BotH - OutH))
+    local LeftW = math.max(0, math.min(self.LeftW, SW - MinCenterW - self.RightW - SplitterW * 2))
+    local RightW = math.max(0, math.min(self.RightW, SW - MinCenterW - LeftW - SplitterW * 2))
 
-    -- If a side is zero-width, hide its splitter contribution for center
-    local leftSplit = (leftW > 0) and SplitterW or 0
-    local rightSplit = (rightW > 0) and SplitterW or 0
-    local botSplit = (botH > 0) and SplitterW or 0
-
-    local centerX = leftW + leftSplit
-    local centerY = topH
-    local centerW = SW - leftW - leftSplit - rightW - rightSplit
-    local centerH = SH - topH - botH - botSplit
-
-    if centerW < MinCenterW then
-        local overflow = MinCenterW - centerW
-        if rightW > MinSide then
-            local take = math.min(overflow, rightW - MinSide)
-            rightW = rightW - take
-            overflow = overflow - take
-        end
-        if overflow > 0 and leftW > MinSide then
-            leftW = math.max(MinSide, leftW - overflow)
-        end
-        centerX = leftW + leftSplit
-        centerW = SW - leftW - leftSplit - rightW - rightSplit
+    local TopVis = self.PanelVisible.RightTop ~= false and not self.Floating.RightTop
+    local BotVis = self.PanelVisible.RightBottom ~= false and not self.Floating.RightBottom
+    if not TopVis and not BotVis then
+        RightW = 0
     end
 
-    local rightX = SW - rightW
-    local rightY = topH
-    local rightH = centerH
+    local LeftSplit = (LeftW > 0) and SplitterW or 0
+    local RightSplit = (RightW > 0) and SplitterW or 0
+    local BotSplit = (BotH > 0) and SplitterW or 0
 
-    -- Internal right split
-    local splitY = rightY
-    local expH, propH = 0, 0
-    if rightW > 0 and rightH > 0 then
-        local avail = rightH - SplitterW
-        expH = math.floor(avail * self.RightSplit)
-        expH = math.max(self.MinRightPane, math.min(expH, avail - self.MinRightPane))
-        propH = avail - expH
-        splitY = rightY + expH
+    local OutSplit = (OutH > 0) and SplitterW or 0
+    local CenterX = LeftW + LeftSplit
+    local CenterY = TopH
+    local CenterW = SW - LeftW - LeftSplit - RightW - RightSplit
+    local CenterH = SH - TopH - BotH - BotSplit - OutH - OutSplit
+
+    if CenterW < MinCenterW then
+        local Overflow = MinCenterW - CenterW
+        if RightW > MinSide then
+            local Take = math.min(Overflow, RightW - MinSide)
+            RightW = RightW - Take
+            Overflow = Overflow - Take
+        end
+        if Overflow > 0 and LeftW > MinSide then
+            LeftW = math.max(MinSide, LeftW - Overflow)
+        end
+        CenterX = LeftW + LeftSplit
+        CenterW = SW - LeftW - LeftSplit - RightW - RightSplit
+    end
+
+    local RightX = SW - RightW
+    local RightY = TopH
+    local RightH = SH - TopH - BotH
+
+    local SplitY = RightY
+    local ExpH, PropH = 0, 0
+    if RightW > 0 and RightH > 0 then
+        local Avail = RightH - SplitterW
+        if TopVis and BotVis then
+            ExpH = math.floor(Avail * self.RightSplit)
+            ExpH = math.max(self.MinRightPane, math.min(ExpH, Avail - self.MinRightPane))
+            PropH = Avail - ExpH
+            SplitY = RightY + ExpH
+        elseif TopVis then
+            ExpH = Avail
+            PropH = 0
+            SplitY = RightY + ExpH
+        elseif BotVis then
+            ExpH = 0
+            PropH = Avail
+            SplitY = RightY
+        end
     end
 
     return {
         Screen = { X = 0, Y = 0, W = SW, H = SH },
-        Top = { X = 0, Y = 0, W = SW, H = topH },
-        Bottom = { X = 0, Y = SH - botH, W = SW, H = botH },
-        Left = { X = 0, Y = centerY, W = leftW, H = centerH },
-        Right = { X = rightX, Y = rightY, W = rightW, H = rightH },
-        RightTop = { X = rightX, Y = rightY, W = rightW, H = expH },
-        RightBottom = { X = rightX, Y = splitY + SplitterW, W = rightW, H = propH },
-        Center = { X = centerX, Y = centerY, W = centerW, H = centerH },
-        -- Splitter hit-rects
-        SplitLeft = leftW > 0 and { X = leftW, Y = centerY, W = SplitterW, H = centerH } or nil,
-        SplitRight = rightW > 0 and { X = rightX - SplitterW, Y = rightY, W = SplitterW, H = rightH } or nil,
-        SplitBottom = botH > 0 and { X = centerX, Y = centerY + centerH, W = centerW, H = SplitterW } or nil,
-        SplitRightInner = (rightW > 0 and expH > 0) and { X = rightX, Y = splitY, W = rightW, H = SplitterW } or nil,
+        Top = { X = 0, Y = 0, W = SW, H = TopH },
+        Bottom = { X = 0, Y = SH - BotH, W = SW, H = BotH },
+        Output = { X = CenterX, Y = CenterY + CenterH, W = CenterW, H = OutH },
+        Left = { X = 0, Y = CenterY, W = LeftW, H = CenterH },
+        Right = { X = RightX, Y = RightY, W = RightW, H = RightH },
+        RightTop = { X = RightX, Y = RightY, W = RightW, H = ExpH },
+        RightBottom = { X = RightX, Y = SplitY + ((TopVis and BotVis) and SplitterW or 0), W = RightW, H = PropH },
+        Center = { X = CenterX, Y = CenterY, W = CenterW, H = CenterH },
+        SplitLeft = LeftW > 0 and { X = LeftW, Y = CenterY, W = SplitterW, H = CenterH } or nil,
+        SplitRight = RightW > 0 and { X = RightX - SplitterW, Y = RightY, W = SplitterW, H = RightH } or nil,
+        SplitOutput = OutH > 0 and { X = CenterX, Y = CenterY + CenterH, W = CenterW, H = SplitterW } or nil,
+        SplitBottom = BotH > 0 and { X = 0, Y = SH - BotH - (BotH > 0 and 0 or 0), W = SW, H = 0 } or nil,
+        SplitRightInner = (RightW > 0 and ExpH > 0 and PropH > 0) and { X = RightX, Y = SplitY, W = RightW, H = SplitterW } or nil,
     }
 end
 
@@ -129,206 +255,350 @@ function Dock:GetRight()
     return self:GetLayout().Right
 end
 
--- ---------------------------------------------------------------------------
--- Apply layout to registered frames (UDim positions)
--- ---------------------------------------------------------------------------
-
-local function ApplyFrame(frame, rect)
-    if not frame or not rect then return end
-    local UDim = require("Services.UDim")
-    frame.Position = UDim.New(0, rect.X, 0, rect.Y)
-    frame.Size = UDim.New(0, rect.W, 0, rect.H)
+local function ApplyFrame(Frame, Rect, Visible)
+    if not Frame then return end
+    if Visible == false or not Rect or Rect.W <= 0 or Rect.H <= 0 then
+        Frame.Visible = false
+        return
+    end
+    Frame.Visible = true
+    Frame.Position = UDim.New(0, Rect.X, 0, Rect.Y)
+    Frame.Size = UDim.New(0, Rect.W, 0, Rect.H)
 end
 
 function Dock:Apply()
     local L = self:GetLayout()
-    ApplyFrame(Content.Top, L.Top)
-    ApplyFrame(Content.Bottom, L.Bottom)
-    ApplyFrame(Content.Left, L.Left)
-    ApplyFrame(Content.RightTop, L.RightTop)
-    ApplyFrame(Content.RightBottom, L.RightBottom)
-    -- Center is usually drawn manually (viewport / script), not a Frame
+    ApplyFrame(Content.Top, L.Top, true)
+    ApplyFrame(Content.Bottom, L.Bottom, self.PanelVisible.Bottom ~= false)
+    ApplyFrame(Content.Output, L.Output, (self.AnimOutputH or 0) > 1 or self.PanelVisible.Output == true)
+    ApplyFrame(Content.Left, L.Left, true)
+
+    if self.Floating.RightTop then
+        local F = self.Floating.RightTop
+        ApplyFrame(Content.RightTop, { X = F.X, Y = F.Y, W = F.W, H = F.H }, true)
+    else
+        ApplyFrame(Content.RightTop, L.RightTop, self.PanelVisible.RightTop ~= false)
+    end
+
+    if self.Floating.RightBottom then
+        local F = self.Floating.RightBottom
+        ApplyFrame(Content.RightBottom, { X = F.X, Y = F.Y, W = F.W, H = F.H }, true)
+    else
+        ApplyFrame(Content.RightBottom, L.RightBottom, self.PanelVisible.RightBottom ~= false)
+    end
 end
 
--- ---------------------------------------------------------------------------
--- Hit-testing helpers for other systems
--- ---------------------------------------------------------------------------
-
-local function InRect(r, x, y)
-    return r and x >= r.X and x < r.X + r.W and y >= r.Y and y < r.Y + r.H
+local function InRect(R, X, Y)
+    return R and X >= R.X and X < R.X + R.W and Y >= R.Y and Y < R.Y + R.H
 end
 
-function Dock:Contains(region, x, y)
+function Dock:Contains(Region, X, Y)
     local L = self:GetLayout()
-    return InRect(L[region], x, y)
+    return InRect(L[Region], X, Y)
 end
 
-function Dock:HitSplitter(x, y)
+local function InflateRect(R, Pad, Axis)
+    if not R then return nil end
+    Pad = Pad or HitPad
+    if Axis == "x" then
+        return { X = R.X - Pad, Y = R.Y, W = R.W + Pad * 2, H = R.H }
+    elseif Axis == "y" then
+        return { X = R.X, Y = R.Y - Pad, W = R.W, H = R.H + Pad * 2 }
+    end
+    return { X = R.X - Pad, Y = R.Y - Pad, W = R.W + Pad * 2, H = R.H + Pad * 2 }
+end
+
+function Dock:HitSplitter(X, Y)
+    local Modal = false
+    pcall(function()
+        local P = package.loaded["Services.Properties"] or _G.Properties
+        if P and P.HasModal and P:HasModal() then Modal = true end
+    end)
+    if Modal then
+        return nil
+    end
     local L = self:GetLayout()
-    if InRect(L.SplitRight, x, y) then return "right" end
-    if InRect(L.SplitLeft, x, y) then return "left" end
-    if InRect(L.SplitBottom, x, y) then return "bottom" end
-    if InRect(L.SplitRightInner, x, y) then return "rightSplit" end
-    -- Top edge of center can resize top dock (grab bottom edge of top)
-    local topEdge = { X = 0, Y = L.Top.H - 2, W = L.Screen.W, H = 4 }
-    if InRect(topEdge, x, y) and L.Top.H > MinTop then return "top" end
+    if InRect(InflateRect(L.SplitRight, HitPad, "x"), X, Y) then return "right" end
+    if InRect(InflateRect(L.SplitLeft, HitPad, "x"), X, Y) then return "left" end
+    if InRect(InflateRect(L.SplitBottom, HitPad, "y"), X, Y) then return "bottom" end
+    if InRect(InflateRect(L.SplitRightInner, HitPad, "y"), X, Y) then return "rightSplit" end
+    if InRect(InflateRect(L.SplitOutput, HitPad, "y"), X, Y) then return "output" end
     return nil
 end
 
--- ---------------------------------------------------------------------------
--- Input: drag splitters
--- ---------------------------------------------------------------------------
+function Dock:HitFloatHeader(X, Y)
+    for Slot, F in pairs(self.Floating) do
+        if F and Y >= F.Y and Y < F.Y + 17 and X >= F.X and X < F.X + F.W then
+            local CloseX = F.X + F.W - 18
+            if X >= CloseX then
+                return Slot, "close"
+            end
+            return Slot, "drag"
+        end
+    end
+    return nil
+end
 
-function Dock:BeginResize(which, mouseX, mouseY)
-    if not which then return false end
-    Drag = which
-    if which == "right" then
-        DragStart = mouseX
+function Dock:HitDockHeaderClose(X, Y)
+    local L = self:GetLayout()
+    local function Check(Slot, Rect)
+        if not Rect or Rect.W <= 0 or Rect.H <= 0 then return nil end
+        if Y >= Rect.Y and Y < Rect.Y + 17 and X >= Rect.X + Rect.W - 18 and X < Rect.X + Rect.W then
+            return Slot, "close"
+        end
+        return nil
+    end
+    if self.PanelVisible.RightTop ~= false and not self.Floating.RightTop then
+        local S, A = Check("RightTop", L.RightTop)
+        if S then return S, A end
+    end
+    if self.PanelVisible.RightBottom ~= false and not self.Floating.RightBottom then
+        local S, A = Check("RightBottom", L.RightBottom)
+        if S then return S, A end
+    end
+    return nil
+end
+
+function Dock:BeginResize(Which, MouseX, MouseY)
+    if not Which then return false end
+    Drag = Which
+    if Which == "right" then
+        DragStart = MouseX
         DragStartSize = self.RightW
-    elseif which == "left" then
-        DragStart = mouseX
+    elseif Which == "left" then
+        DragStart = MouseX
         DragStartSize = self.LeftW
-    elseif which == "top" then
-        DragStart = mouseY
-        DragStartSize = self.TopH
-    elseif which == "bottom" then
-        DragStart = mouseY
+    elseif Which == "bottom" then
+        DragStart = MouseY
         DragStartSize = self.BottomH
-    elseif which == "rightSplit" then
-        DragStart = mouseY
+    elseif Which == "output" then
+        DragStart = MouseY
+        DragStartSize = self.OutputH or 0
+    elseif Which == "rightSplit" then
+        DragStart = MouseY
         DragStartSize = self.RightSplit
     end
     return true
 end
 
-function Dock:UpdateResize(mouseX, mouseY)
+function Dock:BeginFloatDrag(Slot, MouseX, MouseY)
+    local F = self.Floating[Slot]
+    if not F then return false end
+    FloatDrag = {
+        Slot = Slot,
+        OffsetX = MouseX - F.X,
+        OffsetY = MouseY - F.Y,
+    }
+    return true
+end
+
+function Dock:UpdateResize(MouseX, MouseY)
+    if FloatDrag then
+        local F = self.Floating[FloatDrag.Slot]
+        if F then
+            local SW, SH = self:GetScreenSize()
+            F.X = math.max(0, math.min(MouseX - FloatDrag.OffsetX, SW - 40))
+            F.Y = math.max(0, math.min(MouseY - FloatDrag.OffsetY, SH - 40))
+        end
+        return true
+    end
     if not Drag then return false end
     local SW, SH = self:GetScreenSize()
     local L = self:GetLayout()
 
     if Drag == "right" then
-        local delta = DragStart - mouseX
-        local newW = DragStartSize + delta
-        newW = math.max(MinSide, math.min(newW, SW - MinCenterW - self.LeftW - SplitterW * 2))
-        self.RightW = math.floor(newW + 0.5)
+        local Delta = DragStart - MouseX
+        local NewW = DragStartSize + Delta
+        NewW = math.max(MinSide, math.min(NewW, SW - MinCenterW - self.LeftW - SplitterW * 2))
+        self.RightW = math.floor(NewW + 0.5)
+        self._SavedRightW = self.RightW
     elseif Drag == "left" then
-        local delta = mouseX - DragStart
-        local newW = DragStartSize + delta
-        newW = math.max(0, math.min(newW, SW - MinCenterW - self.RightW - SplitterW * 2))
-        self.LeftW = math.floor(newW + 0.5)
-    elseif Drag == "top" then
-        local delta = mouseY - DragStart
-        local newH = DragStartSize + delta
-        newH = math.max(MinTop, math.min(newH, SH - MinCenterH - self.BottomH))
-        self.TopH = math.floor(newH + 0.5)
+        local Delta = MouseX - DragStart
+        local NewW = DragStartSize + Delta
+        NewW = math.max(0, math.min(NewW, SW - MinCenterW - self.RightW - SplitterW * 2))
+        self.LeftW = math.floor(NewW + 0.5)
     elseif Drag == "bottom" then
-        local delta = DragStart - mouseY
-        local newH = DragStartSize + delta
-        newH = math.max(0, math.min(newH, SH - MinCenterH - self.TopH))
-        self.BottomH = math.floor(newH + 0.5)
+        local Delta = DragStart - MouseY
+        local NewH = DragStartSize + Delta
+        NewH = math.max(0, math.min(NewH, SH - MinCenterH - self.TopH))
+        self.BottomH = math.floor(NewH + 0.5)
+    elseif Drag == "output" then
+        local Delta = DragStart - MouseY
+        local NewH = DragStartSize + Delta
+        NewH = math.max(80, math.min(NewH, SH - MinCenterH - self.TopH - self.BottomH))
+        self.OutputH = math.floor(NewH + 0.5)
+        self.TargetOutputH = self.OutputH
+        self.AnimOutputH = self.OutputH
+        self.PanelVisible.Output = true
     elseif Drag == "rightSplit" then
-        local rightH = L.Right.H
-        if rightH > SplitterW + self.MinRightPane * 2 then
-            local rel = (mouseY - L.Right.Y) / (rightH - SplitterW)
-            self.RightSplit = math.max(0.15, math.min(0.85, rel))
+        local RightH = L.Right.H
+        if RightH > SplitterW + self.MinRightPane * 2 then
+            local Rel = (MouseY - L.Right.Y) / (RightH - SplitterW)
+            self.RightSplit = math.max(0.15, math.min(0.85, Rel))
         end
     end
     return true
 end
 
 function Dock:EndResize()
-    local was = Drag ~= nil
+    local Was = Drag ~= nil or FloatDrag ~= nil
     Drag = nil
-    return was
+    FloatDrag = nil
+    return Was
 end
 
 function Dock:IsResizing()
-    return Drag ~= nil
+    return Drag ~= nil or FloatDrag ~= nil
 end
 
 function Dock:GetDragKind()
     return Drag
 end
 
--- ---------------------------------------------------------------------------
--- Cursor feedback
--- ---------------------------------------------------------------------------
-
-function Dock:CursorFor(x, y)
-    local kind = Drag or self:HitSplitter(x, y)
-    if kind == "left" or kind == "right" then
+function Dock:CursorFor(X, Y)
+    local Kind = Drag or self:HitSplitter(X, Y)
+    if Kind == "left" or Kind == "right" then
         return "sizewe"
-    elseif kind == "top" or kind == "bottom" or kind == "rightSplit" then
+    elseif Kind == "bottom" or Kind == "rightSplit" or Kind == "output" then
         return "sizens"
     end
     return nil
 end
 
--- ---------------------------------------------------------------------------
--- Drawing splitters (subtle handles)
--- ---------------------------------------------------------------------------
-
 function Dock:DrawSplitters()
+    local Modal = false
+    pcall(function()
+        local P = package.loaded["Services.Properties"] or _G.Properties
+        if P and P.HasModal and P:HasModal() then Modal = true end
+    end)
+    if Modal then
+        return
+    end
     local L = self:GetLayout()
-    local mx, my = love.mouse.getPosition()
-    local hover = self:HitSplitter(mx, my)
+    local Mx, My = love.mouse.getPosition()
+    local Hover = self:HitSplitter(Mx, My)
 
-    local function drawSplit(rect, kind, vertical)
-        if not rect or rect.W <= 0 or rect.H <= 0 then return end
-        local active = (Drag == kind) or (hover == kind)
-        if active then
-            love.graphics.setColor(0.35, 0.55, 0.95, 0.85)
+    local function DrawSplit(Rect, Kind, Vertical)
+        if not Rect or Rect.W <= 0 or Rect.H <= 0 then return end
+        local Active = (Drag == Kind) or (Hover == Kind)
+        if Active then
+            local C = Theme.Get("SplitterHover")
+            love.graphics.setColor(C[1], C[2], C[3], C[4] or 1)
         else
-            love.graphics.setColor(0.18, 0.18, 0.20, 1)
+            local C = Theme.Get("Splitter")
+            love.graphics.setColor(C[1], C[2], C[3], C[4] or 1)
         end
-        love.graphics.rectangle("fill", rect.X, rect.Y, rect.W, rect.H)
-
-        -- grip marks
-        if active or hover == kind then
-            love.graphics.setColor(0.75, 0.78, 0.90, 0.9)
-            if vertical then
-                local cx = rect.X + rect.W * 0.5
-                local cy = rect.Y + rect.H * 0.5
-                for i = -1, 1 do
-                    love.graphics.rectangle("fill", cx - 0.5, cy + i * 6 - 1, 1, 3)
-                end
-            else
-                local cx = rect.X + rect.W * 0.5
-                local cy = rect.Y + rect.H * 0.5
-                for i = -1, 1 do
-                    love.graphics.rectangle("fill", cx + i * 6 - 1, cy - 0.5, 3, 1)
-                end
-            end
+        if Vertical then
+            local X = math.floor(Rect.X + Rect.W * 0.5)
+            love.graphics.rectangle("fill", X, Rect.Y, 1, Rect.H)
+        else
+            local Y = math.floor(Rect.Y + Rect.H * 0.5)
+            love.graphics.rectangle("fill", Rect.X, Y, Rect.W, 1)
         end
     end
 
-    drawSplit(L.SplitLeft, "left", true)
-    drawSplit(L.SplitRight, "right", true)
-    drawSplit(L.SplitBottom, "bottom", false)
-    drawSplit(L.SplitRightInner, "rightSplit", false)
+    DrawSplit(L.SplitLeft, "left", true)
+    DrawSplit(L.SplitRight, "right", true)
+    DrawSplit(L.SplitBottom, "bottom", false)
+    DrawSplit(L.SplitOutput, "output", false)
+    DrawSplit(L.SplitRightInner, "rightSplit", false)
 end
 
--- ---------------------------------------------------------------------------
--- Public size setters (for ribbon height sync etc.)
--- ---------------------------------------------------------------------------
-
-function Dock:SetTopHeight(h)
-    self.TopH = math.max(MinTop, h or self.TopH)
+local CloseImage = nil
+local function GetCloseImage()
+    if CloseImage ~= nil then return CloseImage end
+    local Ok, Img = pcall(love.graphics.newImage, "Assets/Decals/Close.png")
+    if Ok and Img then
+        CloseImage = Img
+    else
+        CloseImage = false
+    end
+    return CloseImage
 end
 
-function Dock:SetRightWidth(w)
-    self.RightW = math.max(MinSide, w or self.RightW)
+function Dock:DrawPanelChrome()
+    local function Chrome(Rect)
+        if not Rect or Rect.W <= 0 then return end
+        local Hx = Rect.X
+        local Hy = Rect.Y
+        local Hw = Rect.W
+        local Img = GetCloseImage()
+        local Cx = Hx + Hw - 16
+        local Cy = Hy + 1
+        if Img then
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.draw(Img, Cx, Cy, 0, 14 / Img:getWidth(), 14 / Img:getHeight())
+        else
+            love.graphics.setColor(0.9, 0.45, 0.45, 1)
+            love.graphics.print("X", Cx + 2, Cy + 1)
+        end
+    end
+
+    local L = self:GetLayout()
+    if self.PanelVisible.RightTop ~= false and not self.Floating.RightTop then
+        Chrome(L.RightTop)
+    end
+    if self.PanelVisible.RightBottom ~= false and not self.Floating.RightBottom then
+        Chrome(L.RightBottom)
+    end
+    for Slot, F in pairs(self.Floating) do
+        if F then
+            Chrome({ X = F.X, Y = F.Y, W = F.W, H = F.H })
+            love.graphics.setColor(0.15, 0.15, 0.17, 1)
+            love.graphics.rectangle("line", F.X, F.Y, F.W, F.H)
+        end
+    end
 end
 
-function Dock:SetLeftWidth(w)
-    self.LeftW = math.max(0, w or self.LeftW)
+function Dock:SetTopHeight(H)
+    self.TopH = math.max(MinTop, H or self.TopH)
 end
 
-function Dock:SetBottomHeight(h)
-    self.BottomH = math.max(0, h or self.BottomH)
+function Dock:SetRightWidth(W)
+    self.RightW = math.max(MinSide, W or self.RightW)
+    self._SavedRightW = self.RightW
 end
 
--- Expose constants for other modules
+function Dock:SetLeftWidth(W)
+    self.LeftW = math.max(0, W or self.LeftW)
+end
+
+function Dock:SetBottomHeight(H)
+    self.BottomH = math.max(0, H or self.BottomH)
+end
+
+function Dock:SetOutputHeight(H)
+    local V = math.max(0, H or self.OutputH or 0)
+    self.OutputH = V
+    self.TargetOutputH = V
+end
+
+function Dock:Tick(Dt)
+    Dt = math.min(Dt or 0.016, 0.05)
+    local Target = 0
+    if self.PanelVisible.Output then
+        Target = math.max(0, self.TargetOutputH or self.OutputH or 0)
+        if Target < 80 and (self.OutputH or 0) >= 80 then
+            Target = self.OutputH
+        end
+        if Target < 80 then
+            Target = self.OutputH or 180
+            self.TargetOutputH = Target
+        end
+    else
+        Target = 0
+    end
+    local Cur = self.AnimOutputH or 0
+    local Speed = self.TweenSpeed or 14
+    local T = 1 - math.exp(-Speed * Dt)
+    local Next = Cur + (Target - Cur) * T
+    if math.abs(Next - Target) < 0.5 then
+        Next = Target
+    end
+    self.AnimOutputH = Next
+    self.OutputH = Target
+end
+
 Dock.SplitterWidth = SplitterW
 
 _G.Dock = Dock

@@ -1,11 +1,5 @@
 #pragma language glsl3
 
-// ---------------------------------------------------------------------------
-// Rasterized path — same box scene data, single-hit hard lighting.
-// Much cheaper than the full ray-traced Pixel.glsl (no GI / soft shadows /
-// multi-bounce / glass paths). Hot-swapped via Lighting.Rendering.
-// ---------------------------------------------------------------------------
-
 struct Box {
     vec3 Position;
     vec3 Size;
@@ -88,6 +82,9 @@ uniform vec3 CameraRight;
 uniform vec3 CameraUp;
 uniform float Fov;
 uniform float ClockTime;
+uniform float CloudCover;
+uniform float CloudDensity;
+uniform vec3 CloudColor;
 uniform float GlobalShadows;
 uniform float Time;
 
@@ -131,6 +128,23 @@ vec2 GetBoxUv(vec3 HitPos, vec3 BoxPos, vec3 BoxSize, vec3 Normal) {
         Uv = Normal.y > 0.0 ? LocalPos.xz : -LocalPos.xz;
     } else {
         Uv = Normal.z > 0.0 ? -LocalPos.xy : LocalPos.xy;
+    }
+    return Uv + 0.5;
+}
+
+vec2 GetBoxUvOriented(vec3 HitPos, vec3 BoxPos, vec3 BoxSize, vec3 Normal, vec3 Ori) {
+    vec3 Local = HitPos - BoxPos;
+    if (abs(Ori.x) + abs(Ori.y) + abs(Ori.z) > 1e-5) {
+        Local = RotXYZInv(Local, Ori);
+    }
+    Local = Local / max(BoxSize, vec3(1e-5));
+    vec2 Uv = vec2(0.0);
+    if (abs(Normal.x) > 0.5) {
+        Uv = Normal.x > 0.0 ? Local.zy : -Local.zy;
+    } else if (abs(Normal.y) > 0.5) {
+        Uv = Normal.y > 0.0 ? Local.xz : -Local.xz;
+    } else {
+        Uv = Normal.z > 0.0 ? -Local.xy : Local.xy;
     }
     return Uv + 0.5;
 }
@@ -331,7 +345,6 @@ float IntersectCornerWedge(vec3 Ro, vec3 Rd, vec3 Center, vec3 Size, out vec3 No
 }
 
 float IntersectCone(vec3 Ro, vec3 Rd, vec3 Center, vec3 Size, out vec3 Normal) {
-    // Approximate cone as sphere for raster path (cheap)
     return IntersectSphere(Ro, Rd, Center, Size, Normal);
 }
 
@@ -399,37 +412,84 @@ vec3 GetAtmosphere(vec3 Rd, vec3 SunDir) {
     return mix(NightSky, DaySky, SunFactor);
 }
 
+float HashCloudR(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+float NoiseCloudR(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = HashCloudR(i);
+    float b = HashCloudR(i + vec2(1.0, 0.0));
+    float c = HashCloudR(i + vec2(0.0, 1.0));
+    float d = HashCloudR(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float FbmCloudR2(vec2 p) {
+    float v = 0.0; float a = 0.5;
+    for (int i = 0; i < 4; i++) {
+        v += a * NoiseCloudR(p);
+        p = p * 2.05 + vec2(11.3, 7.1);
+        a *= 0.5;
+    }
+    return v;
+}
+vec3 EvalCloudsR(vec3 Rd, vec3 SunDir, float time, out float outAlpha) {
+    outAlpha = 0.0;
+    if (CloudCover < 0.01 || Rd.y < 0.015) return vec3(0.0);
+    float horizon = smoothstep(0.015, 0.22, Rd.y);
+    vec2 uv = Rd.xz / max(Rd.y, 0.08);
+    uv *= mix(0.55, 1.35, CloudDensity);
+    uv += vec2(time * 0.01, time * 0.006);
+    float n = FbmCloudR2(uv);
+    float n2 = FbmCloudR2(uv * 1.7 + vec2(3.1, 5.7));
+    float shape = n * 0.7 + n2 * 0.3;
+    float threshold = 1.0 - clamp(CloudCover, 0.0, 1.0) * 0.88;
+    float dens = smoothstep(threshold, threshold + 0.18 + CloudDensity * 0.25, shape);
+    dens *= horizon;
+    dens = clamp(dens * mix(0.5, 1.2, CloudDensity), 0.0, 1.0);
+    if (dens < 0.01) return vec3(0.0);
+    float thickness = dens * mix(0.4, 1.0, CloudDensity);
+    vec3 thinCol = mix(vec3(0.95, 0.96, 0.98), CloudColor, 0.25);
+    vec3 thickCol = mix(vec3(0.48, 0.50, 0.55), CloudColor * 0.65, 0.35);
+    vec3 albedo = mix(thinCol, thickCol, clamp(thickness * 1.15, 0.0, 1.0));
+    float sunUp = clamp(SunDir.y * 0.5 + 0.5, 0.0, 1.0);
+    float sunFacing = pow(max(0.0, dot(normalize(vec3(Rd.x, max(Rd.y, 0.05), Rd.z)), SunDir)), 2.0);
+    float selfShadow = mix(1.0, 0.45, thickness * 0.85);
+    vec3 lit = albedo * (0.40 + 0.35 * sunUp + 0.45 * sunFacing * selfShadow);
+    float silver = pow(max(0.0, dot(Rd, SunDir)), 6.0) * (1.0 - thickness) * 0.4;
+    lit += vec3(1.1, 1.05, 0.95) * silver * sunUp;
+    outAlpha = dens * dens * (3.0 - 2.0 * dens);
+    outAlpha = clamp(outAlpha, 0.0, 0.92);
+    return lit;
+}
 vec3 GetSky(vec3 Rd, vec3 SunDir, vec3 MoonDir) {
     vec3 Sky = GetAtmosphere(Rd, SunDir);
     vec3 HorizonGlow = vec3(1.0, 0.55, 0.25);
-
     if (SunDir.y > -0.25 && SunDir.y < 0.25) {
         float H = max(0.0, 1.0 - abs(Rd.y) * 3.5);
         float SunDist = max(0.0, dot(Rd, normalize(vec3(SunDir.x, 0.0, SunDir.z))));
         Sky += HorizonGlow * H * pow(SunDist, 5.0) * (1.0 - abs(SunDir.y) * 4.0) * 1.8;
     }
-
     float SunDot = dot(Rd, SunDir);
-    vec3 SunColor = vec3(1.6, 1.4, 1.1);
-    float SunCore  = pow(max(0.0, SunDot), 8000.0);
-    float SunBloom = pow(max(0.0, SunDot), 350.0) * 3.5;
-    Sky += SunColor * SunCore * 18.0;
-    Sky += vec3(1.3, 1.0, 0.6) * SunBloom * smoothstep(-0.2, 0.35, SunDir.y);
-
+    Sky += vec3(1.6, 1.4, 1.1) * pow(max(0.0, SunDot), 8000.0) * 18.0;
+    Sky += vec3(1.3, 1.0, 0.6) * pow(max(0.0, SunDot), 350.0) * 3.5 * smoothstep(-0.2, 0.35, SunDir.y);
     float MoonDot = dot(Rd, MoonDir);
-    vec3 MoonColor = vec3(0.9, 0.95, 1.25);
-    float MoonCore  = pow(max(0.0, MoonDot), 12000.0);
-    float MoonBloom = pow(max(0.0, MoonDot), 600.0) * 2.2;
-    Sky += MoonColor * MoonCore * 14.0;
-    Sky += MoonColor * MoonBloom * smoothstep(-0.2, 0.3, MoonDir.y);
-
+    Sky += vec3(0.9, 0.95, 1.25) * pow(max(0.0, MoonDot), 12000.0) * 14.0;
+    float cAlpha = 0.0;
+    vec3 cCol = EvalCloudsR(Rd, SunDir, Time, cAlpha);
+    if (cAlpha > 0.001) {
+        Sky = mix(Sky, cCol, cAlpha);
+        float sunAtten = 1.0 - cAlpha * mix(0.3, 0.85, CloudDensity);
+        Sky *= mix(1.0, sunAtten, smoothstep(0.25, 0.95, max(0.0, SunDot)));
+    }
     float SunFactor = clamp(SunDir.y, -0.25, 0.25) / 0.5 + 0.5;
     if (SunFactor < 0.65 && Rd.y > 0.04) {
         vec3 P = floor(Rd * 520.0);
         float StarVal = fract(sin(dot(P, vec3(127.1, 311.7, 74.7))) * 43758.5453);
         if (StarVal > 0.995) {
             float Intensity = pow((StarVal - 0.995) / 0.005, 2.0);
-            Sky += vec3(1.5, 1.6, 1.9) * Intensity * (1.0 - SunFactor) * smoothstep(0.04, 0.22, Rd.y) * 22.0;
+            Sky += vec3(1.5, 1.6, 1.9) * Intensity * (1.0 - SunFactor) * (1.0 - cAlpha) * smoothstep(0.04, 0.22, Rd.y) * 22.0;
         }
     }
     return Sky;
@@ -441,34 +501,34 @@ float Hash13(vec3 P) {
     return fract((P.x + P.y) * P.z);
 }
 
-// Cheap hemisphere AO (4 rays) — screenspace-ish via short world rays
 float FastSSAO(vec3 HitPos, vec3 N, int SkipIndex) {
     float ao = 0.0;
-    float radius = 1.8;
-    // Fixed tangent basis
-    vec3 T = normalize(abs(N.y) < 0.9 ? cross(N, vec3(0.0, 1.0, 0.0)) : cross(N, vec3(1.0, 0.0, 0.0)));
-    vec3 B = cross(N, T);
+    float radius = 1.25;
+    vec3 Nn = normalize(N);
+    vec3 T = normalize(abs(Nn.y) < 0.99 ? cross(Nn, vec3(0.0, 1.0, 0.0)) : cross(Nn, vec3(1.0, 0.0, 0.0)));
+    vec3 B = cross(Nn, T);
     for (int i = 0; i < 4; i++) {
-        float a = float(i) * 1.5707963 + 0.4;
-        float h = 0.35 + 0.2 * float(i % 2);
-        vec3 dir = normalize(N * h + T * cos(a) + B * sin(a));
-        vec3 origin = HitPos + N * 0.06;
+        float a = float(i) * 1.5707963 + 0.5;
+        float h = 0.55 + 0.15 * float(i % 2);
+        vec3 dir = normalize(Nn * h + T * cos(a) * 0.65 + B * sin(a) * 0.65);
+        vec3 origin = HitPos + Nn * 0.08;
         float t; vec3 nn;
         int hi = TraceScene(origin, dir, SkipIndex, t, nn);
-        if (hi >= 0 && t > 0.02 && t < radius) {
-            ao += 1.0 - (t / radius);
+        if (hi >= 0 && t > 0.05 && t < radius) {
+            float occ = 1.0 - smoothstep(0.05, radius, t);
+            float nd = max(0.0, dot(Nn, nn));
+            ao += occ * (0.35 + 0.65 * nd);
         }
     }
-    return clamp(1.0 - ao * 0.55, 0.25, 1.0);
+    ao = ao / 4.0;
+    return clamp(1.0 - ao * 0.4, 0.55, 1.0);
 }
 
-// Roughness-aware reflection: 1 sharp ray + optional 2 blurred samples
 vec3 FastReflection(vec3 HitPos, vec3 N, vec3 ViewDir, int SkipIndex,
                     float Roughness, float Reflectivity, vec3 SunDir, vec3 MoonDir) {
     vec3 R = reflect(-ViewDir, N);
     float Rr = clamp(Roughness, 0.0, 1.0);
 
-    // Cone axis sample
     vec3 origin = HitPos + N * 0.08;
     float t; vec3 hn;
     int hi = TraceScene(origin, R, SkipIndex, t, hn);
@@ -478,13 +538,11 @@ vec3 FastReflection(vec3 HitPos, vec3 N, vec3 ViewDir, int SkipIndex,
         float ndl = max(0.0, dot(hn, SunDir));
         float sh = HardShadow(hp, hn, SunDir, hi);
         col = Boxes[hi].Color * (0.25 + 0.9 * ndl * sh);
-        // tint by hit reflectivity slightly
         col = mix(col, GetSky(R, SunDir, MoonDir), clamp(t * 0.008, 0.0, 0.6));
     } else {
         col = GetSky(R, SunDir, MoonDir);
     }
 
-    // Blur with 2 offset rays when rough
     if (Rr > 0.12) {
         vec3 T = normalize(abs(N.y) < 0.9 ? cross(R, vec3(0.0, 1.0, 0.0)) : cross(R, vec3(1.0, 0.0, 0.0)));
         vec3 B = cross(R, T);
@@ -506,14 +564,12 @@ vec3 FastReflection(vec3 HitPos, vec3 N, vec3 ViewDir, int SkipIndex,
         col *= (1.0 / 3.0);
     }
 
-    // Environment fill for very rough surfaces
     if (Rr > 0.55) {
         vec3 env = GetSky(normalize(N + vec3(0.0, 0.4, 0.0)), SunDir, MoonDir);
         col = mix(col, env, (Rr - 0.55) / 0.45 * 0.5);
     }
     return col;
 }
-
 
 vec4 effect(vec4 Color, Image Tex, vec2 TextureCoords, vec2 ScreenCoords) {
     vec2 Uv = (ScreenCoords - 0.5 * Resolution) / Resolution.y;
@@ -534,15 +590,18 @@ vec4 effect(vec4 Color, Image Tex, vec2 TextureCoords, vec2 ScreenCoords) {
         vec3 BaseColor = Boxes[HitIndex].Color;
         float Transparency = Boxes[HitIndex].Transparency;
 
-        // Color map
-        vec2 PartUv = GetBoxUv(HitPos, Boxes[HitIndex].Position, Boxes[HitIndex].Size, HitNormal);
+        vec2 PartUv = GetBoxUvOriented(HitPos, Boxes[HitIndex].Position, Boxes[HitIndex].Size, HitNormal, Boxes[HitIndex].Orientation);
         vec4 TexColor = SampleTexture(Boxes[HitIndex].ColorTexIndex, PartUv);
         BaseColor *= TexColor.rgb;
+        BaseColor *= mix(1.0, 1.0 - Transparency, 0.85);
 
-        // Decal / Texture on top face (same convention as Pixel.glsl)
         if (Boxes[HitIndex].HasDecal > 0.5 && HitNormal.y > 0.5) {
-            vec2 DecalUv = HitPos.xz / max(Boxes[HitIndex].UvStuds, vec2(0.001))
-                        + Boxes[HitIndex].UvOffset;
+            vec3 DecalLocal = HitPos - Boxes[HitIndex].Position;
+            vec3 OriD = Boxes[HitIndex].Orientation;
+            if (abs(OriD.x) + abs(OriD.y) + abs(OriD.z) > 1e-5) {
+                DecalLocal = RotXYZInv(DecalLocal, OriD);
+            }
+            vec2 DecalUv = DecalLocal.xz / max(Boxes[HitIndex].UvStuds, vec2(0.001)) + Boxes[HitIndex].UvOffset;
             vec4 DecalSample = SampleTexture(Boxes[HitIndex].DecalTexIndex, fract(DecalUv));
             vec3 Tinted = DecalSample.rgb * Boxes[HitIndex].DecalColor;
             float DA = DecalSample.a * Boxes[HitIndex].DecalAlpha;
@@ -557,10 +616,12 @@ vec4 effect(vec4 Color, Image Tex, vec2 TextureCoords, vec2 ScreenCoords) {
 
         float Shadow = HardShadow(HitPos, HitNormal, SunDir, HitIndex);
         float AO = FastSSAO(HitPos, HitNormal, HitIndex);
+        AO = mix(AO, 1.0, 0.35);
 
         float Hemi = 0.5 + 0.5 * HitNormal.y;
-        vec3 Ambient = mix(vec3(0.12, 0.13, 0.16), vec3(0.30, 0.34, 0.40), Hemi) * AO;
-        vec3 SunLight = vec3(1.40, 1.28, 1.12) * wrap * Shadow * 2.4;
+        vec3 Ambient = mix(vec3(0.14, 0.15, 0.18), vec3(0.36, 0.40, 0.48), Hemi) * AO;
+        float cloudShade = 1.0 - clamp(CloudCover * mix(0.35, 0.85, CloudDensity), 0.0, 0.9);
+        vec3 SunLight = vec3(1.55, 1.40, 1.18) * wrap * Shadow * 2.8 * cloudShade;
 
         vec3 ViewDir = normalize(CameraPos - HitPos);
         vec3 H = normalize(SunDir + ViewDir);
@@ -568,8 +629,9 @@ vec4 effect(vec4 Color, Image Tex, vec2 TextureCoords, vec2 ScreenCoords) {
         float NdotH = max(0.0, dot(HitNormal, H));
         float sunSpec = pow(NdotH, specPow) * Shadow * mix(0.04, 0.9, Reflectivity) * (1.0 - Roughness * 0.5);
 
-        float body = (1.0 - Reflectivity * mix(0.9, 0.55, Roughness)) * (1.0 - Transparency * 0.5);
-        vec3 Lit = BaseColor * (SunLight + Ambient * 0.95) * body + vec3(sunSpec);
+        float body = (1.0 - Reflectivity * mix(0.9, 0.55, Roughness));
+        vec3 skyBounce = mix(vec3(0.08, 0.10, 0.14), vec3(0.22, 0.28, 0.36), Hemi) * (0.35 + 0.65 * AO);
+        vec3 Lit = BaseColor * (SunLight + Ambient * 0.95 + skyBounce) * body + vec3(sunSpec) * vec3(1.15, 1.1, 1.0);
 
         for (int Li = 0; Li < 8; Li++) {
             if (Li >= LightCount) break;
@@ -584,7 +646,6 @@ vec4 effect(vec4 Color, Image Tex, vec2 TextureCoords, vec2 ScreenCoords) {
             Lit += BaseColor * Lights[Li].Color * Lights[Li].Brightness * ndl * atten * 0.7 * body;
         }
 
-        // Fast reflectivity + roughness reflections
         if (Reflectivity > 0.01) {
             vec3 Rcol = FastReflection(HitPos, HitNormal, ViewDir, HitIndex,
                                        Roughness, Reflectivity, SunDir, MoonDir);
@@ -611,20 +672,35 @@ vec4 effect(vec4 Color, Image Tex, vec2 TextureCoords, vec2 ScreenCoords) {
         FinalColor = mix(Lit, GetSky(RayDir, SunDir, MoonDir), FogFactor);
 
         if (HighlightEnabled > 0.5 && Boxes[HitIndex].IsHighlighted > 0.5) {
-            FinalColor = mix(FinalColor, HighlightFillColor, clamp(HighlightFillAlpha, 0.0, 0.9));
+            FinalColor = mix(FinalColor, HighlightFillColor, clamp(HighlightFillAlpha, 0.0, 0.95));
+            float Step = 1.6 / max(Resolution.y, 1.0);
+            float Edge = 0.0;
+            for (int I = 0; I < 4; I++) {
+                float A = float(I) * 1.5707963 + 0.785398;
+                vec2 OUv = Uv + vec2(cos(A), sin(A)) * Step;
+                vec3 ODir = normalize(CameraForward + CameraRight * OUv.x * TanFov - CameraUp * OUv.y * TanFov);
+                float OT;
+                vec3 ON;
+                int OIdx = TraceScene(CameraPos, ODir, -1, OT, ON);
+                if (OIdx < 0 || Boxes[OIdx].IsHighlighted < 0.5) {
+                    Edge = 1.0;
+                    break;
+                }
+            }
+            if (Edge > 0.5) {
+                FinalColor = mix(FinalColor, HighlightOutlineColor, clamp(HighlightOutlineAlpha, 0.0, 1.0));
+            }
         }
     } else {
         FinalColor = GetSky(RayDir, SunDir, MoonDir);
     }
 
-    // Adornments (unlit)
     if (AdornCount > 0) {
         float At = 1e9;
         int Ai = -1;
         vec3 An = vec3(0.0);
         for (int I = 0; I < AdornCount; I++) {
             vec3 N;
-            // treat adorn as box
             float T = IntersectBox(CameraPos, RayDir, AdornBoxes[I].Position, AdornBoxes[I].Size * 0.5, N);
             if (T > 0.001 && T < At) { At = T; Ai = I; An = N; }
         }
@@ -636,7 +712,6 @@ vec4 effect(vec4 Color, Image Tex, vec2 TextureCoords, vec2 ScreenCoords) {
         }
     }
 
-    // Simple tonemap
     vec3 Mapped = FinalColor * 0.9;
     Mapped = Mapped / (Mapped + vec3(0.9));
     Mapped = pow(max(Mapped, vec3(0.0)), vec3(1.0 / 2.2));

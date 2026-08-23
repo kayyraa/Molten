@@ -1,5 +1,29 @@
 local Pixel = {}
 
+local function CameraFovRadians(Camera)
+    local deg = nil
+    if Camera then
+        deg = rawget(Camera, "FieldOfView")
+        if deg == nil and Camera.GetAttribute then
+            deg = Camera:GetAttribute("FieldOfView")
+        end
+        if deg == nil then
+            local old = Camera.GetAttribute and Camera:GetAttribute("Fov")
+            if type(old) == "number" and old > 0 and old < 10 then
+                deg = old * (180 / math.pi)
+            elseif type(old) == "number" and old >= 10 then
+                deg = old
+            end
+        end
+    end
+    deg = tonumber(deg) or 70
+    if deg < 1 then deg = 70 end
+    if deg < 45 then deg = 45 end
+    if deg > 135 then deg = 135 end
+    return deg * (math.pi / 180)
+end
+
+
 local ShaderService = require("Services.Shader")
 local CFrame = require("Services.CFrame")
 local Geometry = require("Services.Geometry")
@@ -7,7 +31,6 @@ local Geometry = require("Services.Geometry")
 local RayTracedShader = ShaderService.New("Shaders/Pixel.glsl")
 local PostShader = ShaderService.New("Shaders/Post.glsl")
 
--- Active scene shader (hot-switched via Lighting.Rendering)
 local PixelShader = RayTracedShader
 local ActiveRenderingMode = "RayTraced"
 local RasterShader = nil
@@ -20,7 +43,7 @@ do
         RasterShader = sh
         print("[Pixel] Raster.glsl loaded (Lighting.Rendering = Rasterized)")
     else
-        print("[Pixel] Raster.glsl FAILED to compile — Rasterized mode unavailable:")
+        print("[Pixel] Raster.glsl FAILED to compile Γò¼├┤Γö£├ºΓö£Γòó Rasterized mode unavailable:")
         print(tostring(sh))
     end
 end
@@ -128,19 +151,11 @@ local function GetOrientationRad(Child)
             local x = tonumber(arr[1]) or 0
             local y = tonumber(arr[2]) or 0
             local z = tonumber(arr[3]) or 0
-
-            -- auto-detect degrees vs radians: if any abs > 2pi, assume degrees
-            if math.abs(x) > 6.2831853 or math.abs(y) > 6.2831853 or math.abs(z) > 6.2831853 then
-                x = math.rad(x)
-                y = math.rad(y)
-                z = math.rad(z)
-            end
-
-            return {x, y, z}
+            return {math.rad(x), math.rad(y), math.rad(z)}
         end
     end
 
-    -- Try CFrame with Euler extraction (if CFrame has Rotation)
+    
     local cf = Child.CFrame or (Child.GetAttribute and Child:GetAttribute("CFrame"))
     if cf and type(cf) == "table" then
         if cf.ToEulerAnglesYXZ then
@@ -163,15 +178,11 @@ local function GetOrientationRad(Child)
     return {0, 0, 0}
 end
 
--- ---------------------------------------------------------------------------
--- Pixel.Render
--- ---------------------------------------------------------------------------
-
 function Pixel.Render(Camera)
     InitDefaults()
 
     local Width, Height = love.graphics.getDimensions()
-    local Fov = Camera:GetAttribute("Fov")
+    local Fov = CameraFovRadians(Camera)
     local Position = Camera:GetAttribute("Position")
     local Rotation = Camera:GetAttribute("Rotation")
 
@@ -236,17 +247,77 @@ function Pixel.Render(Camera)
     local CamPos = Cf.Position
     local Candidates = {}
 
-    -- -----------------------------------------------------------------------
-    -- Collect part candidates
-    -- -----------------------------------------------------------------------
+    
+    
+    
 
-    for _, Child in ipairs(Workspace:GetChildren()) do
-        if Child:IsA("Part") then
+    local function ConsiderPart(Child, ForceSingle)
+        if not Child then
+            return
+        end
+        if not (Child.IsA and (Child:IsA("Part") or Child:IsA("BasePart"))) then
+            return
+        end
+        if not ForceSingle and Child.ClassName == "UnionOperation" and type(rawget(Child, "SolidPieces")) == "table" and #Child.SolidPieces > 0 then
+            local SavedPos = Child.Position
+            local SavedSize = Child.Size
+            local SavedOri = Child.Orientation
+            local Ux, Uy, Uz = 0, 0, 0
+            local PosRaw = Child.Position
+            if type(PosRaw) == "table" then
+                if PosRaw.ToArray then PosRaw = PosRaw:ToArray() end
+                Ux, Uy, Uz = PosRaw[1] or 0, PosRaw[2] or 0, PosRaw[3] or 0
+            end
+            local Ox, Oy, Oz = 0, 0, 0
+            local OriRaw = Child.Orientation
+            if type(OriRaw) == "table" then
+                if OriRaw.ToArray then OriRaw = OriRaw:ToArray() end
+                Ox, Oy, Oz = math.rad(OriRaw[1] or 0), math.rad(OriRaw[2] or 0), math.rad(OriRaw[3] or 0)
+            end
+            local Cx, Sx_, Cy, Sy_ = math.cos(Ox), math.sin(Ox), math.cos(Oy), math.sin(Oy)
+            local Cz, Sz_ = math.cos(Oz), math.sin(Oz)
+            local function RotLocal(Lx, Ly, Lz)
+                local X1 = Lx * Cz - Ly * Sz_
+                local Y1 = Lx * Sz_ + Ly * Cz
+                local Z1 = Lz
+                local X2 = X1 * Cy + Z1 * Sy_
+                local Y2 = Y1
+                local Z2 = -X1 * Sy_ + Z1 * Cy
+                local X3 = X2
+                local Y3 = Y2 * Cx - Z2 * Sx_
+                local Z3 = Y2 * Sx_ + Z2 * Cx
+                return X3, Y3, Z3
+            end
+            for SI = 1, #Child.SolidPieces do
+                local Sp = Child.SolidPieces[SI]
+                if Sp and Sp.Position and Sp.Size then
+                    local P = Sp.Position
+                    local S = Sp.Size
+                    if type(P) == "table" and P.ToArray then P = P:ToArray() end
+                    if type(S) == "table" and S.ToArray then S = S:ToArray() end
+                    local Rx, Ry, Rz = RotLocal(P[1] or 0, P[2] or 0, P[3] or 0)
+                    Child.Position = {Ux + Rx, Uy + Ry, Uz + Rz}
+                    Child.Size = {math.abs(S[1] or 1), math.abs(S[2] or 1), math.abs(S[3] or 1)}
+                    Child.Orientation = {0, 0, 0}
+                    ConsiderPart(Child, true)
+                end
+            end
+            Child.Position = SavedPos
+            Child.Size = SavedSize
+            Child.Orientation = SavedOri
+            return
+        end
             local PosRaw = Child.Position or Child:GetAttribute("Position")
             local Pos = type(PosRaw) == "table" and PosRaw.ToArray and PosRaw:ToArray() or PosRaw
+            if type(Pos) ~= "table" then
+                goto continue_part
+            end
 
             local SizeRaw = Child.Size or Child:GetAttribute("Size")
             local Size = type(SizeRaw) == "table" and SizeRaw.ToArray and SizeRaw:ToArray() or SizeRaw
+            if type(Size) ~= "table" then
+                Size = {4, 1, 2}
+            end
 
             local Transparency = Child.Transparency or Child:GetAttribute("Transparency") or 0
             if type(Transparency) ~= "number" then
@@ -274,7 +345,7 @@ function Pixel.Render(Camera)
                 Mat = {}
             end
 
-            -- SurfaceAppearance can parent to BasePart; overrides maps + PBR scalars
+            
             local SA = nil
             do
                 local ok, kids = pcall(function()
@@ -316,7 +387,7 @@ function Pixel.Render(Camera)
             else
                 Reflectivity = 0
             end
-            -- Metalness contributes to reflectivity for the current shading model
+            
             Reflectivity = math.max(Reflectivity, Metalness * 0.85)
             if type(Refractivity) == "number" then
                 Refractivity = math.max(0, math.min(1, Refractivity))
@@ -385,13 +456,39 @@ function Pixel.Render(Camera)
             do
                 local SelSet = _G.SelectionSet
                 local HL = _G.SelectionHighlight
+                local Hover = _G.HoverPart
+
+                local function IsUnder(Node, Ancestor)
+                    if not Node or not Ancestor then return false end
+                    if Node == Ancestor then return true end
+                    local Cur = Node
+                    for _ = 1, 32 do
+                        Cur = rawget(Cur, "_Parent") or Cur.Parent
+                        if not Cur then return false end
+                        if Cur == Ancestor then return true end
+                    end
+                    return false
+                end
 
                 if SelSet and SelSet[Child] then
                     IsHighlighted = 1
-                elseif HL and HL.Enabled ~= false and HL.Adornee == Child then
-                    IsHighlighted = 1
-                elseif _G.HoverPart == Child and Child.Locked ~= true then
-                    IsHighlighted = 1
+                elseif SelSet then
+                    for Sel, On in pairs(SelSet) do
+                        if On and (Sel == Child or IsUnder(Child, Sel)) then
+                            IsHighlighted = 1
+                            break
+                        end
+                    end
+                end
+                if IsHighlighted == 0 and HL and HL.Enabled ~= false and HL.Adornee then
+                    if HL.Adornee == Child or IsUnder(Child, HL.Adornee) then
+                        IsHighlighted = 1
+                    end
+                end
+                if IsHighlighted == 0 and Hover and Child.Locked ~= true then
+                    if Hover == Child or IsUnder(Child, Hover) then
+                        IsHighlighted = 1
+                    end
                 end
             end
 
@@ -431,13 +528,41 @@ function Pixel.Render(Camera)
                 _Part = Child
             })
 
-            ::continue_part::
+                    ::continue_part::
+    end
+
+    local function CollectPartsUnder(Node)
+        if not Node then
+            return
+        end
+        local Children = rawget(Node, "Children")
+        if not Children and Node.GetChildren then
+            Children = Node:GetChildren()
+        end
+        if not Children then
+            return
+        end
+        for Index = 1, #Children do
+            local Child = Children[Index]
+            ConsiderPart(Child)
+            local ClassName = rawget(Child, "ClassName")
+            if ClassName == "Folder" or ClassName == "Model" or ClassName == "Configuration"
+                or (Child.IsA and (Child:IsA("Folder") or Child:IsA("Model"))) then
+                CollectPartsUnder(Child)
+            elseif Child.GetChildren and #(rawget(Child, "Children") or {}) > 0 then
+                
+                if not (Child.IsA and Child:IsA("BasePart")) then
+                    CollectPartsUnder(Child)
+                end
+            end
         end
     end
 
-    -- -----------------------------------------------------------------------
-    -- Editor-only adornments (attachments, handle adornments)
-    -- -----------------------------------------------------------------------
+    CollectPartsUnder(Workspace)
+
+    
+    
+    
 
     local function ToPos3(v)
         if not v then
@@ -543,7 +668,7 @@ function Pixel.Render(Camera)
                 OriArr = OA.ToArray and OA:ToArray() or OA
             end
 
-            -- apply CFrameOffset rotation roughly
+            
             local RotOff = {ox, oy, oz}
             PosX, PosY, PosZ = PosX + RotOff[1], PosY + RotOff[2], PosZ + RotOff[3]
 
@@ -616,15 +741,15 @@ function Pixel.Render(Camera)
         table.insert(Boxes, C)
     end
 
-    -- -----------------------------------------------------------------------
-    -- Triangle pool (custom mesh geometry, currently disabled via `false and`)
-    -- -----------------------------------------------------------------------
+    
+    
+    
 
     local TriPool = {}
     local TRI_POOL_MAX = 96
 
     for _, Box in ipairs(Boxes) do
-        -- Analytical shapes (incl. CornerWedge = 5) need no triangle pool
+        
         Box.TriStart = -1
         Box.TriCount = 0
         Box._Part = nil
@@ -680,9 +805,9 @@ function Pixel.Render(Camera)
         return {Pp[1] + Local[1], Pp[2] + Local[2], Pp[3] + Local[3]}
     end
 
-    -- -----------------------------------------------------------------------
-    -- Lights
-    -- -----------------------------------------------------------------------
+    
+    
+    
 
     local Lights = {}
 
@@ -755,12 +880,48 @@ function Pixel.Render(Camera)
             or Lighting:GetAttribute("ClockTime")
             or 12
         if Lighting.Brightness ~= nil then
-            -- reserved for future exposure scaling
+            
         end
     end
     ClockTime = ClockTime % 24
     if ClockTime < 0 then
         ClockTime = ClockTime + 24
+    end
+
+    local CloudCover, CloudDensity = 0.0, 0.7
+    local CloudColor = {1, 1, 1}
+    do
+        local Terrain = nil
+        local Ws = rawget(_G, "Workspace")
+        if Ws then
+            local kids = rawget(Ws, "Children")
+            if kids then
+                for i = 1, #kids do
+                    local c = kids[i]
+                    if c and (c.ClassName == "Terrain" or c.Name == "Terrain") then
+                        Terrain = c
+                        break
+                    end
+                end
+            end
+            if Terrain then
+                local ck = rawget(Terrain, "Children")
+                if ck then
+                    for i = 1, #ck do
+                        local n = ck[i]
+                        if n and (n.ClassName == "Clouds" or n.Name == "Clouds") then
+                            CloudCover = tonumber(n.Cover) or 0.5
+                            CloudDensity = tonumber(n.Density) or 0.7
+                            local col = n.Color
+                            if type(col) == "table" then
+                                CloudColor = {col[1] or 1, col[2] or 1, col[3] or 1}
+                            end
+                            break
+                        end
+                    end
+                end
+            end
+        end
     end
 
     local GlobalShadows = 1.0
@@ -776,9 +937,9 @@ function Pixel.Render(Camera)
         end
     end
 
-    -- -----------------------------------------------------------------------
-    -- Selection highlight config
-    -- -----------------------------------------------------------------------
+    
+    
+    
 
     local HL = _G.SelectionHighlight
     local HLEnabled = 0
@@ -814,9 +975,9 @@ function Pixel.Render(Camera)
         end
     end
 
-    -- -----------------------------------------------------------------------
-    -- Hot-switch scene shader from Lighting.Rendering
-    -- -----------------------------------------------------------------------
+    
+    
+    
     local renderMode = "RayTraced"
     if Lighting then
         local rm = rawget(Lighting, "Rendering")
@@ -824,7 +985,7 @@ function Pixel.Render(Camera)
             rm = Lighting:GetAttribute("Rendering")
         end
         if type(rm) == "string" and rm ~= "" then
-            -- Accept "Rasterized", "Enum.Rendering.Rasterized", etc.
+            
             local leaf = rm:match("([^%.]+)$") or rm
             if leaf == "Rasterized" or leaf == "RayTraced" then
                 renderMode = leaf
@@ -835,12 +996,12 @@ function Pixel.Render(Camera)
     end
     if renderMode ~= ActiveRenderingMode then
         SelectSceneShader(renderMode)
-        print("[Pixel] Rendering mode →", ActiveRenderingMode)
+        print("[Pixel] Rendering mode Γò¼├┤Γö£├æΓö£├Ñ", ActiveRenderingMode)
     end
 
-    -- -----------------------------------------------------------------------
-    -- Send uniforms to shader
-    -- -----------------------------------------------------------------------
+    
+    
+    
 
     PixelShader:Bind()
     PixelShader:Send({
@@ -854,6 +1015,9 @@ function Pixel.Render(Camera)
         AdornCount = #AdornBoxes,
         LightCount = #Lights,
         ClockTime = ClockTime,
+        CloudCover = CloudCover,
+        CloudDensity = CloudDensity,
+        CloudColor = CloudColor,
         GlobalShadows = GlobalShadows,
         Time = love.timer.getTime(),
         HighlightEnabled = HLEnabled,
@@ -964,7 +1128,7 @@ function Pixel.Render(Camera)
     PixelShader:Unbind()
     love.graphics.setCanvas()
 
-    -- Camera motion factor for temporal reservoir trust
+    
     local CamPos = Cf.Position or {0, 0, 0}
     local CamFwd = Cf.Forward or {0, 0, 1}
     local motion = 0
@@ -986,27 +1150,127 @@ function Pixel.Render(Camera)
     PrevCamFwd = {CamFwd[1] or 0, CamFwd[2] or 0, CamFwd[3] or 0}
     FrameIndex = FrameIndex + 1
 
-    -- Temporal weight: high when still, low when moving
+    
     local temporalAlpha = 0.12 + math.min(0.75, motion * 0.35)
+
+    local BloomEnabled, BloomIntensity, BloomSize, BloomThreshold = 0, 0.4, 24, 0.95
+    local CcEnabled, CcBrightness, CcContrast, CcSaturation = 0, 0, 0, 0
+    local CcTint = {1, 1, 1}
+    local DofEnabled, DofFar, DofNear, DofFocus, DofRadius = 0, 0.75, 0.75, 50, 30
+    local RaysEnabled, RaysIntensity, RaysSpread = 0, 0.25, 1
+    local BlurEnabled, BlurSize = 0, 24
+    local SunScreen = {0.5, 0.5}
+    local SunVisible = 0
+
+    local function ReadEffectProps()
+        local L = rawget(_G, "Lighting")
+        if not L then return end
+        local kids = rawget(L, "Children")
+        if not kids and L.GetChildren then kids = L:GetChildren() end
+        if not kids then return end
+        for i = 1, #kids do
+            local n = kids[i]
+            local cn = rawget(n, "ClassName") or ""
+            local en = n.Enabled
+            if en == nil and n.GetAttribute then en = n:GetAttribute("Enabled") end
+            if cn == "BloomEffect" and en ~= false then
+                BloomEnabled = 1
+                BloomIntensity = tonumber(n.Intensity) or 0.4
+                BloomSize = tonumber(n.Size) or 24
+                BloomThreshold = tonumber(n.Threshold) or 0.95
+            elseif cn == "ColorCorrectionEffect" and en ~= false then
+                CcEnabled = 1
+                CcBrightness = tonumber(n.Brightness) or 0
+                CcContrast = tonumber(n.Contrast) or 0
+                CcSaturation = tonumber(n.Saturation) or 0
+                local t = n.TintColor
+                if type(t) == "table" then
+                    CcTint = {t[1] or 1, t[2] or 1, t[3] or 1}
+                end
+            elseif cn == "DepthOfFieldEffect" and en ~= false then
+                DofEnabled = 1
+                DofFar = tonumber(n.FarIntensity) or 0.75
+                DofNear = tonumber(n.NearIntensity) or 0.75
+                DofFocus = tonumber(n.FocusDistance) or 50
+                DofRadius = tonumber(n.InFocusRadius) or 30
+            elseif cn == "SunRaysEffect" and en ~= false then
+                RaysEnabled = 1
+                RaysIntensity = tonumber(n.Intensity) or 0.25
+                RaysSpread = tonumber(n.Spread) or 1
+            elseif cn == "BlurEffect" and en ~= false then
+                BlurEnabled = 1
+                BlurSize = tonumber(n.Size) or 24
+            end
+        end
+    end
+    ReadEffectProps()
+
+    do
+        local DayAngle = ((ClockTime or 12) - 6.0) / 24.0 * 6.2831853
+        local SunDir = {math.cos(DayAngle), math.sin(DayAngle), 0.28}
+        local len = math.sqrt(SunDir[1]*SunDir[1] + SunDir[2]*SunDir[2] + SunDir[3]*SunDir[3])
+        if len > 1e-6 then
+            SunDir[1], SunDir[2], SunDir[3] = SunDir[1]/len, SunDir[2]/len, SunDir[3]/len
+        end
+        local CamPos = Cf.Position or {0, 4, 0}
+        local CamFwd = Cf.Forward or {0, 0, -1}
+        local CamRight = Cf.Right or {1, 0, 0}
+        local CamUp = Cf.Up or {0, 1, 0}
+        local Fov = CameraFovRadians(Camera)
+        local TanFov = math.tan(Fov * 0.5)
+        local sx = SunDir[1] * (CamRight[1] or 0) + SunDir[2] * (CamRight[2] or 0) + SunDir[3] * (CamRight[3] or 0)
+        local sy = SunDir[1] * (CamUp[1] or 0) + SunDir[2] * (CamUp[2] or 0) + SunDir[3] * (CamUp[3] or 0)
+        local sz = SunDir[1] * (CamFwd[1] or 0) + SunDir[2] * (CamFwd[2] or 0) + SunDir[3] * (CamFwd[3] or 0)
+        if sz > 0.05 then
+            SunVisible = 1
+            SunScreen = {
+                0.5 + (sx / (sz * TanFov)) * 0.5 * (Height / math.max(Width, 1)),
+                0.5 - (sy / (sz * TanFov)) * 0.5
+            }
+        end
+    end
 
     local isRaster = (ActiveRenderingMode == "Rasterized")
     PostShader:Bind()
     PostShader:Send({
         Resolution = {Width, Height},
-        -- Raster: almost no denoise / temporal so the flat look stays sharp
+        
         DenoiseStrength = isRaster and 0.05 or (Pixel.DenoiseStrength or 0.55),
         FxaaQuality = isRaster and 2.0 or (Pixel.FxaaQuality or 8.0),
         TemporalAlpha = isRaster and 0.95 or temporalAlpha,
         FrameIndex = FrameIndex % 1024,
         RestirRadius = isRaster and 0.5 or (Pixel.RestirRadius or 3.0),
         RestirSamples = isRaster and 1.0 or (Pixel.RestirSamples or 8.0),
+        BloomEnabled = BloomEnabled,
+        BloomIntensity = BloomIntensity,
+        BloomSize = BloomSize,
+        BloomThreshold = BloomThreshold,
+        CcEnabled = CcEnabled,
+        CcBrightness = CcBrightness,
+        CcContrast = CcContrast,
+        CcSaturation = CcSaturation,
+        CcTint = CcTint,
+        DofEnabled = DofEnabled,
+        DofFarIntensity = DofFar,
+        DofNearIntensity = DofNear,
+        DofFocusDistance = DofFocus,
+        DofInFocusRadius = DofRadius,
+        SunRaysEnabled = RaysEnabled,
+        SunRaysIntensity = RaysIntensity,
+        SunRaysSpread = RaysSpread,
+        SunScreenPos = SunScreen,
+        SunVisible = SunVisible,
+        CloudCover = CloudCover,
+        CloudDensity = CloudDensity,
+        BlurEnabled = BlurEnabled,
+        BlurSize = BlurSize,
     })
-    -- History as second texture unit if shader supports it
+    
     pcall(function()
         PostShader._Program:send("HistoryTex", HistoryCanvas)
     end)
 
-    -- Post into OutputCanvas (HistoryTex is previous frame — no read/write hazard)
+    
     love.graphics.setCanvas(OutputCanvas)
     love.graphics.clear(0, 0, 0, 1)
     love.graphics.setColor(1, 1, 1, 1)
@@ -1014,21 +1278,17 @@ function Pixel.Render(Camera)
     love.graphics.setCanvas()
     PostShader:Unbind()
 
-    -- Present
+    
     love.graphics.setColor(1, 1, 1, 1)
     love.graphics.draw(OutputCanvas, 0, 0)
 
-    -- Ping history for next frame
+    
     love.graphics.setCanvas(HistoryCanvas)
     love.graphics.clear(0, 0, 0, 1)
     love.graphics.setColor(1, 1, 1, 1)
     love.graphics.draw(OutputCanvas, 0, 0)
     love.graphics.setCanvas()
 end
-
--- ---------------------------------------------------------------------------
--- Pixel.Pick (mouse-ray picking, CPU-side)
--- ---------------------------------------------------------------------------
 
 local function ToArr(V)
     if not V then
@@ -1152,51 +1412,50 @@ local function IntersectCylinder(Ro, Rd, Pos, Size)
     return math.min(tSide, tCap)
 end
 
-
 local function RotateVecEulerXYZ(v, ori)
-    -- ori in radians, R = Rz * Ry * Rx applied to column vector
+    
     local cx, sx = math.cos(ori[1] or 0), math.sin(ori[1] or 0)
     local cy, sy = math.cos(ori[2] or 0), math.sin(ori[2] or 0)
     local cz, sz = math.cos(ori[3] or 0), math.sin(ori[3] or 0)
-    -- first Rx
+    
     local x, y, z = v[1], v[2], v[3]
     local y1 = y * cx - z * sx
     local z1 = y * sx + z * cx
     local x1 = x
-    -- then Ry
+    
     local x2 = x1 * cy + z1 * sy
     local z2 = -x1 * sy + z1 * cy
     local y2 = y1
-    -- then Rz
+    
     local x3 = x2 * cz - y2 * sz
     local y3 = x2 * sz + y2 * cz
     return {x3, y3, z2}
 end
 
 local function RotateVecEulerXYZInv(v, ori)
-    -- transpose = inverse for rotation: apply Rx^-1 * Ry^-1 * Rz^-1 = Rx(-) Ry(-) Rz(-)
+    
     local neg = { -(ori[1] or 0), -(ori[2] or 0), -(ori[3] or 0) }
-    -- apply in reverse order with negated angles: first Rz(-), then Ry(-), then Rx(-)
+    
     local cx, sx = math.cos(neg[1]), math.sin(neg[1])
     local cy, sy = math.cos(neg[2]), math.sin(neg[2])
     local cz, sz = math.cos(neg[3]), math.sin(neg[3])
     local x, y, z = v[1], v[2], v[3]
-    -- Rz(-)
+    
     local x1 = x * cz - y * sz
     local y1 = x * sz + y * cz
     local z1 = z
-    -- Ry(-)
+    
     local x2 = x1 * cy + z1 * sy
     local z2 = -x1 * sy + z1 * cy
     local y2 = y1
-    -- Rx(-)
+    
     local y3 = y2 * cx - z2 * sx
     local z3 = y2 * sx + z2 * cx
     return {x2, y3, z3}
 end
 
 local function IntersectOrientedAABB(Ro, Rd, Pos, Half, Ori)
-    -- Transform ray into local (unrotated) space
+    
     local has = math.abs(Ori[1] or 0) > 1e-5 or math.abs(Ori[2] or 0) > 1e-5 or math.abs(Ori[3] or 0) > 1e-5
     local ro, rd = Ro, Rd
     if has then
@@ -1214,7 +1473,7 @@ function Pixel.Pick(Camera, ScreenX, ScreenY)
     end
 
     local Width, Height = love.graphics.getDimensions()
-    local Fov = Camera:GetAttribute("Fov") or (math.pi / 1.75)
+    local Fov = CameraFovRadians(Camera)
     local Position = Camera:GetAttribute("Position") or {0, 4, 0}
     local Rotation = Camera:GetAttribute("Rotation") or {0, 0, 0}
 
@@ -1238,37 +1497,118 @@ function Pixel.Pick(Camera, ScreenX, ScreenY)
 
     local Ro = {Cf.Position[1], Cf.Position[2], Cf.Position[3]}
     local bestT, bestPart = 1e12, nil
+    local bestLockedT, bestLocked = 1e12, nil
 
-    for _, Child in ipairs(Workspace:GetChildren()) do
-        if Child:IsA("Part") or Child:IsA("BasePart") then
+    local function ToArr(V)
+        if not V then return {0, 0, 0} end
+        if type(V) == "table" and V.ToArray then
+            return V:ToArray()
+        end
+        if type(V) == "table" then
+            return {V[1] or 0, V[2] or 0, V[3] or 0}
+        end
+        return {0, 0, 0}
+    end
+
+    local function TestPart(Child)
+        if not Child or not Child.IsA then return end
+        if not (Child:IsA("Part") or Child:IsA("BasePart")) then return end
+        local function HitBox(Pos, Size, Ori)
+            local t = IntersectOrientedAABB(Ro, Rd, Pos, {Size[1] * 0.5, Size[2] * 0.5, Size[3] * 0.5}, Ori)
+            if t and t > 0.001 then
+                if Child.Locked == true then
+                    if t < bestLockedT then
+                        bestLockedT = t
+                        bestLocked = Child
+                    end
+                else
+                    if t < bestT then
+                        bestT = t
+                        bestPart = Child
+                    end
+                end
+            end
+        end
+        if Child.ClassName == "UnionOperation" and type(rawget(Child, "SolidPieces")) == "table" and #Child.SolidPieces > 0 then
+            local U = ToArr(Child.Position)
+            local OriDeg = ToArr(Child.Orientation)
+            local Ox, Oy, Oz = math.rad(OriDeg[1] or 0), math.rad(OriDeg[2] or 0), math.rad(OriDeg[3] or 0)
+            local Cx, Sx_ = math.cos(Ox), math.sin(Ox)
+            local Cy, Sy_ = math.cos(Oy), math.sin(Oy)
+            local Cz, Sz_ = math.cos(Oz), math.sin(Oz)
+            local function RotLocal(Lx, Ly, Lz)
+                local X1 = Lx * Cz - Ly * Sz_
+                local Y1 = Lx * Sz_ + Ly * Cz
+                local Z1 = Lz
+                local X2 = X1 * Cy + Z1 * Sy_
+                local Y2 = Y1
+                local Z2 = -X1 * Sy_ + Z1 * Cy
+                local X3 = X2
+                local Y3 = Y2 * Cx - Z2 * Sx_
+                local Z3 = Y2 * Sx_ + Z2 * Cx
+                return X3, Y3, Z3
+            end
+            for SI = 1, #Child.SolidPieces do
+                local Sp = Child.SolidPieces[SI]
+                if Sp then
+                    local P = ToArr(Sp.Position)
+                    local S = ToArr(Sp.Size)
+                    local Rx, Ry, Rz = RotLocal(P[1], P[2], P[3])
+                    HitBox({U[1] + Rx, U[2] + Ry, U[3] + Rz}, S, {0, 0, 0})
+                end
+            end
+            return
+        end
+        local Pos = ToArr(Child.Position or (Child.GetAttribute and Child:GetAttribute("Position")))
+        local Size = ToArr(Child.Size or (Child.GetAttribute and Child:GetAttribute("Size")))
+        local Shape = tostring(Child.Shape or (Child.GetAttribute and Child:GetAttribute("Shape")) or "Block"):lower()
+        local Ori = GetOrientationRad(Child)
+        local t = -1
+        if Shape == "sphere" or Shape == "ball" then
+            t = IntersectSphere(Ro, Rd, Pos, Size)
+        elseif Shape == "cylinder" then
+            t = IntersectCylinder(Ro, Rd, Pos, Size)
+        else
+            t = IntersectOrientedAABB(Ro, Rd, Pos, {Size[1] * 0.5, Size[2] * 0.5, Size[3] * 0.5}, Ori)
+        end
+        if t and t > 0.001 then
             if Child.Locked == true then
-                goto continue
-            end
-
-            local Pos = ToArr(Child.Position or Child:GetAttribute("Position"))
-            local Size = ToArr(Child.Size or Child:GetAttribute("Size"))
-            local Shape = tostring(Child.Shape or Child:GetAttribute("Shape") or "Block"):lower()
-            local Ori = GetOrientationRad(Child)
-
-            local t = -1
-            if Shape == "sphere" or Shape == "ball" then
-                t = IntersectSphere(Ro, Rd, Pos, Size)
-            elseif Shape == "cylinder" then
-                t = IntersectCylinder(Ro, Rd, Pos, Size)
+                if t < bestLockedT then
+                    bestLockedT = t
+                    bestLocked = Child
+                end
             else
-                t = IntersectOrientedAABB(Ro, Rd, Pos, {Size[1] * 0.5, Size[2] * 0.5, Size[3] * 0.5}, Ori)
+                if t < bestT then
+                    bestT = t
+                    bestPart = Child
+                end
             end
-
-            if t > 0.001 and t < bestT then
-                bestT = t
-                bestPart = Child
-            end
-
-            ::continue::
         end
     end
 
-    return bestPart
+    local function Walk(Node)
+        if not Node then return end
+        local Children = rawget(Node, "Children")
+        if not Children and Node.GetChildren then
+            Children = Node:GetChildren()
+        end
+        if not Children then return end
+        for i = 1, #Children do
+            local Child = Children[i]
+            TestPart(Child)
+            local Cn = rawget(Child, "ClassName")
+            if Cn == "Folder" or Cn == "Model" or Cn == "Configuration"
+                or (Child.IsA and not Child:IsA("BasePart") and #(rawget(Child, "Children") or {}) > 0) then
+                Walk(Child)
+            end
+        end
+    end
+
+    Walk(Workspace)
+    if bestPart then
+        return bestPart
+    end
+    return nil
 end
 
 return Pixel

@@ -438,9 +438,31 @@ function Geometry.IntersectPlaneY(Ro, Rd, PlaneY)
     return {Ro[1] + Rd[1] * T, Ro[2] + Rd[2] * T, Ro[3] + Rd[3] * T}
 end
 
+local function CameraFovRadians(Camera)
+    local deg = nil
+    if Camera then
+        deg = rawget(Camera, "FieldOfView")
+        if deg == nil and Camera.GetAttribute then
+            deg = Camera:GetAttribute("FieldOfView")
+        end
+        if deg == nil then
+            local old = Camera.GetAttribute and Camera:GetAttribute("Fov")
+            if type(old) == "number" and old > 0 and old < 10 then
+                deg = old * (180 / math.pi)
+            elseif type(old) == "number" and old >= 10 then
+                deg = old
+            end
+        end
+    end
+    deg = tonumber(deg) or 70
+    if deg < 45 then deg = 45 end
+    if deg > 135 then deg = 135 end
+    return deg * (math.pi / 180)
+end
+
 function Geometry.CameraRay(Camera, ScreenX, ScreenY)
     local Width, Height = love.graphics.getDimensions()
-    local Fov = Camera:GetAttribute("Fov") or (math.pi / 1.75)
+    local Fov = CameraFovRadians(Camera)
     local Position = Camera:GetAttribute("Position") or {0, 4, 0}
     local Rotation = Camera:GetAttribute("Rotation") or {0, 0, 0}
     local Pitch, Yaw = Rotation[1] or 0, Rotation[2] or 0
@@ -509,6 +531,16 @@ function Geometry.WorkspaceRaycast(Origin, Direction, Params)
         if not ShouldConsider(Part) then
             return
         end
+        local respect = true
+        if Params and Params.RespectCanCollide ~= nil then
+            respect = Params.RespectCanCollide
+        end
+        if respect and Part.CanCollide == false then
+            return
+        end
+        if Part.CanQuery == false then
+            return
+        end
         local Pos = ToArr3(Part.Position or Part:GetAttribute("Position"))
         local Size = ToArr3(Part.Size or Part:GetAttribute("Size") or {4, 4, 4})
         local Shape = string.lower(tostring(Part.Shape or Part:GetAttribute("Shape") or "Block"))
@@ -559,3 +591,4 @@ end
 Geometry.ToArr3 = ToArr3
 
 return Geometry
+

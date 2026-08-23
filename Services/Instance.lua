@@ -29,6 +29,8 @@ local Inheritance = {
     WedgePart = {"WedgePart", "Part", "BasePart", "PVInstance", "Instance"},
     CornerWedgePart = {"CornerWedgePart", "Part", "BasePart", "PVInstance", "Instance"},
     MeshPart = {"MeshPart", "BasePart", "PVInstance", "Instance"},
+    SpawnLocation = {"SpawnLocation", "Part", "BasePart", "PVInstance", "Instance"},
+    UnionOperation = {"UnionOperation", "BasePart", "PVInstance", "Instance"},
     Decal = {"Decal", "FaceInstance", "Instance"},
     Texture = {"Texture", "Decal", "FaceInstance", "Instance"},
     PointLight = {"PointLight", "Light", "Instance"},
@@ -52,9 +54,28 @@ local Inheritance = {
     ServerScriptService = {"ServerScriptService", "Instance"},
     ServerStorage = {"ServerStorage", "Instance"},
     StarterGui = {"StarterGui", "Instance"},
+    StarterPlayer = {"StarterPlayer", "Instance"},
+    StarterPlayerScripts = {"StarterPlayerScripts", "Instance"},
+    StarterCharacterScripts = {"StarterCharacterScripts", "Instance"},
     Script = {"Script", "Instance"},
     LocalScript = {"LocalScript", "Instance"},
+    ModuleScript = {"ModuleScript", "Instance"},
+    RemoteEvent = {"RemoteEvent", "Instance"},
+    RemoteFunction = {"RemoteFunction", "Instance"},
+    BindableEvent = {"BindableEvent", "Instance"},
+    BindableFunction = {"BindableFunction", "Instance"},
+    Motor6D = {"Motor6D", "Instance"},
+    Players = {"Players", "Instance"},
+    Player = {"Player", "Instance"},
     Terrain = {"Terrain", "Instance"},
+    BloomEffect = {"BloomEffect", "PostEffect", "Instance"},
+    BlurEffect = {"BlurEffect", "PostEffect", "Instance"},
+    DepthOfFieldEffect = {"DepthOfFieldEffect", "PostEffect", "Instance"},
+    ColorCorrectionEffect = {"ColorCorrectionEffect", "PostEffect", "Instance"},
+    SunRaysEffect = {"SunRaysEffect", "PostEffect", "Instance"},
+    Atmosphere = {"Atmosphere", "Instance"},
+    Clouds = {"Clouds", "Instance"},
+    PostEffect = {"PostEffect", "Instance"},
 }
 
 local function CreateSignal()
@@ -107,10 +128,6 @@ local function CloneValue(Value)
     return Copy
 end
 
--- ---------------------------------------------------------------------------
--- Default property tables
--- ---------------------------------------------------------------------------
-
 local Defaults = {
     BasePart = {
         Size = Vector3.new(4, 4, 4),
@@ -124,12 +141,29 @@ local Defaults = {
             Refractivity = 0
         },
         Anchored = false,
+        CanCollide = true,
+        CanTouch = true,
+        CanQuery = true,
+        CollisionGroup = "Default",
+        CollisionFidelity = "Default",
+        AssemblyLinearVelocity = Vector3.new(0, 0, 0),
+        AssemblyAngularVelocity = Vector3.new(0, 0, 0),
+        Velocity = Vector3.new(0, 0, 0),
         Transparency = 0,
         Locked = false
     },
 
     Part = {
         Shape = "Block"
+    },
+
+    SpawnLocation = {
+        Shape = "Block",
+        Duration = 0,
+        Enabled = true,
+        Neutral = true,
+        AllowTeamChangeOnTouch = false,
+        TeamColor = {0.4, 0.7, 1, 1},
     },
 
     WedgePart = {
@@ -221,7 +255,7 @@ local Defaults = {
         ClipDescendants = true
     },
 
-    -- Services (Roblox-like property surface)
+    
     Lighting = {
         ClockTime = 14,
         Brightness = 2,
@@ -235,7 +269,7 @@ local Defaults = {
         GlobalShadows = true,
         EnvironmentDiffuseScale = 1,
         EnvironmentSpecularScale = 1,
-        Rendering = "RayTraced",
+        Rendering = "Rasterized",
     },
 
     Workspace = {
@@ -257,17 +291,104 @@ local Defaults = {
         Enabled = true,
         Source = "",
     },
+    ModuleScript = {
+        Source = "",
+    },
+    RemoteEvent = {},
+    RemoteFunction = {},
+    BindableEvent = {},
+    BindableFunction = {},
+    Motor6D = {
+        Part0 = nil,
+        Part1 = nil,
+        C0 = {0, 0, 0},
+        C1 = {0, 0, 0},
+        Enabled = true,
+    },
+    Players = {},
+    Player = {},
 
     Folder = {},
     ReplicatedStorage = {},
     ServerScriptService = {},
     ServerStorage = {},
     StarterGui = {},
-}
 
--- ---------------------------------------------------------------------------
--- Instance.new
--- ---------------------------------------------------------------------------
+    StarterPlayer = {
+        CameraMaxZoomDistance = 128,
+        CameraMinZoomDistance = 0.5,
+        CameraMode = "Classic",
+        DevCameraOcclusionMode = "Zoom",
+        DevComputerCameraMovementMode = "UserChoice",
+        DevComputerMovementMode = "UserChoice",
+        DevTouchCameraMovementMode = "UserChoice",
+        DevTouchMovementMode = "UserChoice",
+        EnableMouseLockOption = true,
+        AutoJumpEnabled = true,
+        CharacterJumpHeight = 7.2,
+        CharacterJumpPower = 50,
+        CharacterUseJumpPower = false,
+        CharacterMaxSlopeAngle = 89,
+        CharacterWalkSpeed = 16,
+        HealthDisplayDistance = 100,
+        NameDisplayDistance = 100,
+        LoadCharacterAppearance = true,
+        UserEmotesEnabled = true,
+    },
+    StarterPlayerScripts = {},
+    StarterCharacterScripts = {},
+
+    Terrain = {
+        WaterColor = {12/255, 84/255, 91/255, 1},
+        WaterReflectance = 1,
+        WaterTransparency = 0.3,
+        WaterWaveSize = 0.15,
+        WaterWaveSpeed = 10,
+    },
+
+    BloomEffect = {
+        Enabled = true,
+        Intensity = 0.4,
+        Size = 24,
+        Threshold = 0.95,
+    },
+    BlurEffect = {
+        Enabled = true,
+        Size = 24,
+    },
+    DepthOfFieldEffect = {
+        Enabled = false,
+        FarIntensity = 0.75,
+        FocusDistance = 50,
+        InFocusRadius = 30,
+        NearIntensity = 0.75,
+    },
+    ColorCorrectionEffect = {
+        Enabled = true,
+        Brightness = 0,
+        Contrast = 0,
+        Saturation = 0,
+        TintColor = {1, 1, 1, 1},
+    },
+    SunRaysEffect = {
+        Enabled = true,
+        Intensity = 0.25,
+        Spread = 1,
+    },
+    Atmosphere = {
+        Density = 0.3,
+        Offset = 0.25,
+        Color = {199/255, 199/255, 199/255, 1},
+        Decay = {106/255, 112/255, 125/255, 1},
+        Glare = 0,
+        Haze = 0,
+    },
+    Clouds = {
+        Cover = 0.5,
+        Density = 0.7,
+        Color = {1, 1, 1, 1},
+    },
+}
 
 function Instance.new(ClassName, Parent)
     local Obj = {
@@ -305,6 +426,10 @@ function Instance.new(ClassName, Parent)
     end
 
     Obj.Name = ClassName
+    pcall(function()
+        local R = package.loaded["Services.Runtime"] or rawget(_G, "Runtime")
+        if R and R.HookInstance then R.HookInstance(Obj) end
+    end)
 
     local isGui = (ClassName == "Frame" or ClassName == "TextLabel" or ClassName == "ImageLabel"
         or ClassName == "ScreenGui" or ClassName == "GuiObject")
@@ -384,7 +509,7 @@ function Instance.new(ClassName, Parent)
             end
         end
 
-        -- orphan / destroy children so they don't linger
+        
         local kids = rawget(self, "Children")
         if kids then
             for i = #kids, 1, -1 do
@@ -403,7 +528,7 @@ function Instance.new(ClassName, Parent)
     function Obj:Clone()
         local copy = Instance.new(self.ClassName)
 
-        -- Copy scalar / table properties (skip internal/runtime)
+        
         local skip = {
             Children = true, Guid = true, _Parent = true, Parent = true,
             OnEnter = true, OnLeave = true, OnClick = true, Changed = true,
@@ -425,7 +550,7 @@ function Instance.new(ClassName, Parent)
 
         copy.Name = self.Name
 
-        -- Recursively clone children
+        
         local kids = rawget(self, "Children")
         if kids then
             for i = 1, #kids do
@@ -461,6 +586,10 @@ function Instance.new(ClassName, Parent)
                 if Value and Value.Children then
                     table.insert(Value.Children, Tbl)
                 end
+                local Ex = package.loaded["Services.Explorer"] or rawget(_G, "Explorer")
+                if Ex and Ex.MarkDirty then
+                    pcall(function() Ex:MarkDirty() end)
+                end
             else
                 local old = rawget(Tbl, Key)
                 rawset(Tbl, Key, Value)
@@ -471,6 +600,12 @@ function Instance.new(ClassName, Parent)
                         pcall(function()
                             ch:Fire(Key)
                         end)
+                    end
+                    if Key == "Name" then
+                        local Ex = package.loaded["Services.Explorer"] or rawget(_G, "Explorer")
+                        if Ex and Ex.MarkDirty then
+                            pcall(function() Ex:MarkDirty() end)
+                        end
                     end
                 end
             end
@@ -487,17 +622,15 @@ function Instance.new(ClassName, Parent)
     return Obj
 end
 
--- ---------------------------------------------------------------------------
--- Default service tree
--- ---------------------------------------------------------------------------
-
 local ServiceDefinitions = {
     {Name = "Workspace", ClassName = "Workspace"},
     {Name = "ReplicatedStorage", ClassName = "ReplicatedStorage"},
     {Name = "Lighting", ClassName = "Lighting"},
     {Name = "ServerScriptService", ClassName = "ServerScriptService"},
     {Name = "ServerStorage", ClassName = "ServerStorage"},
-    {Name = "StarterGui", ClassName = "StarterGui"}
+    {Name = "StarterGui", ClassName = "StarterGui"},
+    {Name = "StarterPlayer", ClassName = "StarterPlayer"},
+    {Name = "Players", ClassName = "Players"},
 }
 
 if not _G.Game then
@@ -512,6 +645,19 @@ if not _G.Game then
     end
 end
 
+if _G.StarterPlayer then
+    if not _G.StarterPlayer:FindFirstChild("StarterPlayerScripts") then
+        local Sps = Instance.new("StarterPlayerScripts", _G.StarterPlayer)
+        Sps.Name = "StarterPlayerScripts"
+    end
+    if not _G.StarterPlayer:FindFirstChild("StarterCharacterScripts") then
+        local Scs = Instance.new("StarterCharacterScripts", _G.StarterPlayer)
+        Scs.Name = "StarterCharacterScripts"
+    end
+    _G.StarterPlayerScripts = _G.StarterPlayer:FindFirstChild("StarterPlayerScripts")
+    _G.StarterCharacterScripts = _G.StarterPlayer:FindFirstChild("StarterCharacterScripts")
+end
+
 if not _G.CoreGui then
     _G.CoreGui = Instance.new("Folder")
     _G.CoreGui.Name = "CoreGui"
@@ -521,7 +667,6 @@ if _G.Workspace and rawget(_G.Workspace, "CurrentCamera") == nil then
     rawset(_G.Workspace, "CurrentCamera", nil)
 end
 
--- Permanent Terrain child of Workspace (not deletable)
 if _G.Workspace then
     local existing = nil
     for _, ch in ipairs(_G.Workspace:GetChildren()) do
@@ -533,12 +678,12 @@ if _G.Workspace then
     if not existing then
         local terrain = Instance.new("Terrain", _G.Workspace)
         terrain.Name = "Terrain"
-        -- Voxel storage (coarse occupancy map for Fill*)
+        
         terrain._Voxels = {}
         terrain._CellSize = 4
 
         function terrain:FillBlock(cframe, size, material)
-            -- cframe: CFrame or {Position, ...}; size: Vector3; material: Enum.Material or string
+            
             local pos
             if type(cframe) == "table" and cframe.Position then
                 pos = cframe.Position
@@ -603,7 +748,7 @@ if _G.Workspace then
         end
 
         function terrain:Fill(size, cframe, vertexShape, material)
-            -- Studio-like alias: Terrain:Fill(Size, CFrame, VertexShape, Material)
+            
             vertexShape = tostring(vertexShape or "Block")
             if vertexShape == "Ball" or vertexShape == "Sphere" then
                 local pos = cframe

@@ -1,9 +1,13 @@
 local Color = require("Services.Color")
+local Theme = _G.Theme or require("Services.Theme")
 local UDim = require("Services.UDim")
 local Instance = require("Services.Instance")
 local Gui = require("Services.Gui")
 
 local Explorer = {}
+Explorer.Dirty = true
+Explorer._Sig = ""
+Explorer._SigTimer = 0
 
 local RowHeight = 22
 local IndentSize = 16
@@ -66,11 +70,8 @@ local function HasChildren(Node)
     return Children and #Children > 0
 end
 
--- ---------------------------------------------------------------------------
--- Insert Object menu
--- ---------------------------------------------------------------------------
-
 local InsertMenu = nil
+local InsertIconCache = {}
 local MenuIconCache = {}
 
 local InsertUsage = {}
@@ -82,7 +83,7 @@ local InsertGroups = {
     },
     {
         Name = "Parts",
-        Items = {"Part", "WedgePart", "MeshPart"},
+        Items = {"Part", "WedgePart", "MeshPart", "SpawnLocation"},
     },
     {
         Name = "Models",
@@ -90,7 +91,7 @@ local InsertGroups = {
     },
     {
         Name = "Scripts",
-        Items = {"Script", "LocalScript", "ModuleScript"},
+        Items = {"Script", "LocalScript", "ModuleScript", "RemoteEvent", "RemoteFunction", "BindableEvent", "BindableFunction"},
     },
     {
         Name = "Effects",
@@ -103,6 +104,10 @@ local InsertGroups = {
     {
         Name = "Camera",
         Items = {"Camera"},
+    },
+    {
+        Name = "Effects",
+        Items = {"BloomEffect", "BlurEffect", "DepthOfFieldEffect", "ColorCorrectionEffect", "SunRaysEffect", "Atmosphere", "Clouds"},
     },
 }
 
@@ -186,7 +191,7 @@ Explorer.Selected = nil
 Explorer.SelectedSet = {}
 Explorer.OnSelect = nil
 Explorer.OnDeleted = nil
-Explorer.Clipboard = {} -- list of cloned roots for paste
+Explorer.Clipboard = {} 
 
 function Explorer:IsSelected(Node)
     return Node ~= nil and (self.SelectedSet[Node] == true or self.Selected == Node)
@@ -268,12 +273,19 @@ local function IsBlacklisted(Node)
         end
     end
 
+    local Ws = rawget(_G, "Workspace")
+    if Ws then
+        local Cam = rawget(Ws, "CurrentCamera")
+        if Cam and Cam == Node then
+            return true
+        end
+    end
+    if _G.CurrentCamera and _G.CurrentCamera == Node then
+        return true
+    end
+
     return false
 end
-
--- ---------------------------------------------------------------------------
--- Row building
--- ---------------------------------------------------------------------------
 
 local RowList = {}
 
@@ -303,7 +315,7 @@ local function BuildRow(Parent, Node, Depth, RowIndex)
         AddW = IconSize,
     }
 
-    Frame.BackgroundColor = IsSelected and Color.FromRGBA(53, 83, 143) or Color.FromRGBA(40, 40, 40)
+    Frame.BackgroundColor = IsSelected and Theme.Get("ItemSelected") or Theme.Get("Item")
     Frame.ZIndex = 2
 
     local Label = Instance.new("TextLabel", Frame)
@@ -326,7 +338,7 @@ local function BuildRow(Parent, Node, Depth, RowIndex)
         Renaming.Label = Label
     else
         Label.Text = Node.Name
-        Label.TextColor = IsSelected and Color.FromRGBA(255, 255, 255) or Color.FromRGBA(210, 210, 210)
+        Label.TextColor = IsSelected and Theme.Get("BrightText") or Theme.Get("MainText")
     end
 
     if HasChildren(Node) then
@@ -339,15 +351,9 @@ local function BuildRow(Parent, Node, Depth, RowIndex)
         Arrow.Position = UDim.New(0, IndentX, 0.5, 0)
         Arrow.Size = UDim.FromOffset(ArrowSize, ArrowSize)
         Arrow.ZIndex = 3
+        Arrow.MouseCursor = "hand"
 
-        Arrow.OnClick:Connect(function()
-            if Renaming then
-                return
-            end
-            ExpandedState[Key] = not ExpandedState[Key]
-            Explorer:Refresh()
-        end)
-    end
+end
 
     local IconPath = GetIconPath(Node)
     WarnIfMissing(IconPath)
@@ -365,12 +371,13 @@ local function BuildRow(Parent, Node, Depth, RowIndex)
     Add.Size = UDim.FromOffset(IconSize, IconSize)
     Add.Visible = false
     Add.ZIndex = 3
+    Add.MouseCursor = "hand"
 
     Frame.OnEnter:Connect(function()
         if not IsRenaming then
             Add.Visible = true
             if not IsSelected then
-                Frame.BackgroundColor = Color.FromRGBA(60, 60, 60)
+                Frame.BackgroundColor = Theme.Get("ItemHover")
             end
         end
     end)
@@ -378,7 +385,7 @@ local function BuildRow(Parent, Node, Depth, RowIndex)
     Frame.OnLeave:Connect(function()
         Add.Visible = false
         if not IsSelected and not IsRenaming then
-            Frame.BackgroundColor = Color.FromRGBA(40, 40, 40)
+            Frame.BackgroundColor = Theme.Get("Item")
         end
     end)
 
@@ -390,9 +397,11 @@ local function BuildRow(Parent, Node, Depth, RowIndex)
             Search = "",
             Cursor = 1,
             Searching = true,
+            ScrollY = 0,
         }
     end)
 
+    Frame.MouseCursor = "arrow"
     Frame.OnClick:Connect(function()
         if Renaming and Renaming.Node ~= Node then
             Explorer:CommitRename()
@@ -441,15 +450,45 @@ local function CountRecursive(Node)
     return Count
 end
 
--- ---------------------------------------------------------------------------
--- Init / Refresh / scroll
--- ---------------------------------------------------------------------------
-
 function Explorer:Init(Container, Root)
     ContainerFrame = Container
     RootNode = Root
     ExpandedState[tostring(Root)] = true
     Explorer:Refresh()
+end
+
+
+local function HierarchySig(Node, Depth, Acc)
+    if Depth > 48 or not Node then return Acc end
+    local Kids = rawget(Node, "Children")
+    Acc = Acc .. tostring(Node.Name or "") .. ":" .. tostring(Node.ClassName or "") .. ";"
+    if Kids then
+        Acc = Acc .. tostring(#Kids) .. "|"
+        for I = 1, #Kids do
+            Acc = HierarchySig(Kids[I], Depth + 1, Acc)
+            if #Acc > 8000 then return Acc end
+        end
+    end
+    return Acc
+end
+
+function Explorer:MarkDirty()
+    self.Dirty = true
+end
+
+function Explorer:Tick(Dt)
+    self._SigTimer = (self._SigTimer or 0) + (Dt or 0)
+    if self._SigTimer < 0.12 and not self.Dirty then
+        return
+    end
+    self._SigTimer = 0
+    if not RootNode then return end
+    local Sig = HierarchySig(RootNode, 0, "")
+    if Sig ~= self._Sig or self.Dirty then
+        self._Sig = Sig
+        self.Dirty = false
+        self:Refresh()
+    end
 end
 
 function Explorer:Refresh()
@@ -466,6 +505,8 @@ function Explorer:Refresh()
 
     RowList = {}
     Walk(ContainerFrame, RootNode, 0, 0)
+    self._Sig = HierarchySig(RootNode, 0, "")
+    self.Dirty = false
 end
 
 function Explorer:HandleWheel(DeltaY)
@@ -476,10 +517,6 @@ function Explorer:HandleWheel(DeltaY)
     self.ScrollY = math.max(0, math.min(Max, self.ScrollY - DeltaY * RowHeight))
     self:Refresh()
 end
-
--- ---------------------------------------------------------------------------
--- Renaming
--- ---------------------------------------------------------------------------
 
 function Explorer:IsRenaming()
     return Renaming ~= nil
@@ -612,10 +649,6 @@ function Explorer:HandleRenameKey(Key)
     return false
 end
 
--- ---------------------------------------------------------------------------
--- Delete / copy / paste / duplicate
--- ---------------------------------------------------------------------------
-
 function Explorer:DeleteSelected()
     pcall(function()
         local V = require("Services.Visuals")
@@ -697,7 +730,6 @@ function Explorer:Paste(parentOverride)
     if not parent then
         parent = self.Selected
         if not parent or IsBlacklisted(parent) then
-            -- prefer Workspace as default paste target
             parent = rawget(_G, "Workspace") or RootNode
         end
     end
@@ -712,7 +744,6 @@ function Explorer:Paste(parentOverride)
         end)
 
         if ok and copy then
-            -- slight offset for BaseParts so they don't stack exactly
             if copy:IsA("BasePart") and copy.Position then
                 local pos = copy.Position
                 local arr = pos.ToArray and pos:ToArray() or {pos.Px or pos[1] or 0, pos.Py or pos[2] or 0, pos.Pz or pos[3] or 0}
@@ -759,7 +790,6 @@ function Explorer:DuplicateSelected()
         return false
     end
 
-    -- paste under the same parent as the first selected
     local parent = nil
     for Node, _ in pairs(self.SelectedSet) do
         parent = rawget(Node, "_Parent") or Node.Parent
@@ -771,10 +801,6 @@ function Explorer:DuplicateSelected()
 
     return self:Paste(parent)
 end
-
--- ---------------------------------------------------------------------------
--- Insert menu
--- ---------------------------------------------------------------------------
 
 function Explorer:HasInsertMenu()
     return InsertMenu ~= nil
@@ -866,39 +892,47 @@ function Explorer:HandleInsertClick(MouseX, MouseY)
         return false
     end
 
-    local ItemH, MenuW = 22, 200
-    local SearchH = 26
-    local entries = BuildInsertEntries(InsertMenu.Search or "")
-    local MenuH = SearchH + 6 + #entries * ItemH + 6
-    local X, Y = InsertMenu.X, InsertMenu.Y
+    local X = InsertMenu.X or 0
+    local Y = InsertMenu.Y or 0
+    local MenuW = InsertMenu.MenuW or 200
+    local MenuH = InsertMenu.MenuH or 100
+    local SearchH = InsertMenu.SearchH or 26
+    local ItemH = InsertMenu.ItemH or 22
+    local listH = InsertMenu.ListH or 100
+    local listTop = Y + 3 + SearchH
 
     if MouseX < X or MouseX > X + MenuW or MouseY < Y or MouseY > Y + MenuH then
         InsertMenu = nil
         return true
     end
 
-    if MouseY >= Y + 3 and MouseY < Y + 3 + SearchH then
+    if MouseY >= Y + 4 and MouseY <= Y + 4 + SearchH then
         InsertMenu.Searching = true
         return true
     end
 
-    local Index = math.floor((MouseY - Y - 3 - SearchH) / ItemH) + 1
-    if Index >= 1 and Index <= #entries then
-        local e = entries[Index]
-        if e.Kind == "item" then
+    InsertMenu.Searching = true
+    local entries = InsertMenu.Entries or BuildInsertEntries(InsertMenu.Search or "")
+    local scroll = InsertMenu.ScrollY or 0
+    if MouseY >= listTop and MouseY < listTop + listH then
+        local rel = (MouseY - listTop) + scroll
+        local idx = math.floor(rel / ItemH) + 1
+        local e = entries[idx]
+        if e and e.Kind == "item" and e.ClassName then
             self:InsertObject(InsertMenu.ParentNode, e.ClassName)
             InsertMenu = nil
             return true
         end
     end
-
     return true
 end
 
+
 function Explorer:HandleInsertTextInput(Text)
-    if not InsertMenu or not InsertMenu.Searching then
+    if not InsertMenu then
         return false
     end
+    InsertMenu.Searching = true
     if type(Text) ~= "string" then
         return true
     end
@@ -909,7 +943,17 @@ function Explorer:HandleInsertTextInput(Text)
 
     InsertMenu.Search = Before .. Clean .. After
     InsertMenu.Cursor = (InsertMenu.Cursor or 1) + #Clean
+    InsertMenu.ScrollY = 0
 
+    return true
+end
+
+function Explorer:HandleInsertWheel(Y)
+    if not InsertMenu then
+        return false
+    end
+    local maxScroll = math.max(0, (InsertMenu.ListContentH or 0) - (InsertMenu.ListH or 0))
+    InsertMenu.ScrollY = math.max(0, math.min(maxScroll, (InsertMenu.ScrollY or 0) - Y * 22))
     return true
 end
 
@@ -923,9 +967,7 @@ function Explorer:HandleInsertKey(Key)
         return true
     end
 
-    if not InsertMenu.Searching then
-        return false
-    end
+    InsertMenu.Searching = true
 
     if Key == "return" or Key == "kpenter" then
         local entries = BuildInsertEntries(InsertMenu.Search or "")
@@ -961,7 +1003,6 @@ function Explorer:HandleInsertKey(Key)
 end
 
 function Explorer:GetPanelBounds()
-    -- Prefer the Dock right-top pane when available
     local ok, DockMod = pcall(require, "Services.Dock")
     if ok and DockMod and DockMod.GetLayout then
         local L = DockMod:GetLayout()
@@ -969,7 +1010,6 @@ function Explorer:GetPanelBounds()
             return L.RightTop.X, L.RightTop.Y, L.RightTop.W, L.RightTop.H
         end
     end
-    -- Fallback (pre-dock layout)
     local W, H = love.graphics.getDimensions()
     local PanelW = 256
     local PanelLeft = W - PanelW
@@ -1006,13 +1046,14 @@ function Explorer:DrawInsertMenu()
 
     local ItemH, MenuW = 22, 200
     local SearchH = 26
+    local MaxListH = 220
     local entries = BuildInsertEntries(InsertMenu.Search or "")
-    local MenuH = SearchH + 6 + math.max(#entries, 1) * ItemH + 6
+    local listContentH = math.max(#entries, 1) * ItemH
+    local listH = math.min(MaxListH, listContentH)
+    local MenuH = SearchH + 6 + listH + 6
     local PanelLeft, PanelTop, PanelW, PanelH = self:GetPanelBounds()
     local W, H = love.graphics.getDimensions()
 
-    -- Fixed horizontal position: left edge of Explorer panel
-    -- (menu opens to the left of panel if needed)
     local X = PanelLeft - MenuW - 4
     if X < 4 then
         X = PanelLeft + 4
@@ -1023,7 +1064,7 @@ function Explorer:DrawInsertMenu()
 
     local Y = InsertMenu.Y or (PanelTop + 20)
     if Y + MenuH > H - 4 then
-        Y = math.max(4, Y - MenuH)
+        Y = math.max(4, H - MenuH - 4)
     end
     if Y < 4 then
         Y = 4
@@ -1031,6 +1072,16 @@ function Explorer:DrawInsertMenu()
 
     InsertMenu.X = X
     InsertMenu.Y = Y
+    InsertMenu.MenuW = MenuW
+    InsertMenu.MenuH = MenuH
+    InsertMenu.ListH = listH
+    InsertMenu.ListContentH = listContentH
+    InsertMenu.ItemH = ItemH
+    InsertMenu.SearchH = SearchH
+    InsertMenu.ScrollY = InsertMenu.ScrollY or 0
+    local maxScroll = math.max(0, listContentH - listH)
+    if InsertMenu.ScrollY > maxScroll then InsertMenu.ScrollY = maxScroll end
+    if InsertMenu.ScrollY < 0 then InsertMenu.ScrollY = 0 end
 
     local mx, my = love.mouse.getPosition()
 
@@ -1043,15 +1094,18 @@ function Explorer:DrawInsertMenu()
 
     love.graphics.setColor(0.12, 0.12, 0.13, 1)
     love.graphics.rectangle("fill", X + 4, Y + 4, MenuW - 8, SearchH)
-    love.graphics.setColor(0.35, 0.35, 0.38, 1)
+    love.graphics.setColor(InsertMenu.Searching and 0.35 or 0.28, InsertMenu.Searching and 0.55 or 0.35, InsertMenu.Searching and 0.95 or 0.38, 1)
     love.graphics.rectangle("line", X + 4, Y + 4, MenuW - 8, SearchH)
 
     local search = InsertMenu.Search or ""
     local cur = InsertMenu.Cursor or (#search + 1)
-    local blink = (math.floor(love.timer.getTime() * 2) % 2 == 0) and "_" or " "
+    local blink = InsertMenu.Searching and ((math.floor(love.timer.getTime() * 2) % 2 == 0) and "|" or " ") or ""
     local shown = search:sub(1, cur - 1) .. blink .. search:sub(cur)
 
-    if search == "" and blink == " " then
+    if search == "" and not InsertMenu.Searching then
+        love.graphics.setColor(0.45, 0.45, 0.48, 1)
+        pcall(love.graphics.print, "Search classes...", X + 10, Y + 9)
+    elseif search == "" and blink == " " then
         love.graphics.setColor(0.45, 0.45, 0.48, 1)
         pcall(love.graphics.print, "Search classes...", X + 10, Y + 9)
     else
@@ -1059,64 +1113,66 @@ function Explorer:DrawInsertMenu()
         pcall(love.graphics.print, shown, X + 10, Y + 9)
     end
 
+    local listTop = Y + 3 + SearchH
+    love.graphics.setScissor(X + 2, listTop, MenuW - 4, listH)
+
     if #entries == 0 then
         love.graphics.setColor(0.5, 0.5, 0.55, 1)
-        pcall(love.graphics.print, "No matches", X + 10, Y + 3 + SearchH + 6)
-        return
-    end
-
-    for i, e in ipairs(entries) do
-        local iy = Y + 3 + SearchH + (i - 1) * ItemH
-
-        if e.Kind == "header" then
-            love.graphics.setColor(0.55, 0.55, 0.6, 1)
-            pcall(love.graphics.print, tostring(e.Text or ""), X + 8, iy + 4)
-        else
-            local hovered = mx >= X and mx <= X + MenuW and my >= iy and my < iy + ItemH
-
-            if hovered then
-                love.graphics.setColor(0.0, 0.47, 0.84, 1)
-                love.graphics.rectangle("fill", X + 1, iy, MenuW - 2, ItemH)
-            end
-
-            local iconPath = string.format("Assets/Instances/%s.png", e.ClassName)
-            local img = MenuIconCache[iconPath]
-
-            if img == nil then
-                if love.filesystem and love.filesystem.getInfo and love.filesystem.getInfo(iconPath) then
-                    local ok, result = pcall(love.graphics.newImage, iconPath)
-                    img = ok and result or false
+        pcall(love.graphics.print, "No matches", X + 10, listTop + 6)
+    else
+        for i, e in ipairs(entries) do
+            local iy = listTop + (i - 1) * ItemH - InsertMenu.ScrollY
+            if iy + ItemH >= listTop and iy <= listTop + listH then
+                local hover = mx >= X and mx <= X + MenuW and my >= iy and my < iy + ItemH and my >= listTop and my < listTop + listH
+                if e.Kind == "header" then
+                    love.graphics.setColor(0.18, 0.18, 0.2, 1)
+                    love.graphics.rectangle("fill", X + 2, iy, MenuW - 4, ItemH)
+                    love.graphics.setColor(0.55, 0.55, 0.6, 1)
+                    pcall(love.graphics.print, e.Text or "", X + 10, iy + 4)
                 else
-                    img = false
+                    if hover then
+                        love.graphics.setColor(0.22, 0.32, 0.48, 1)
+                        love.graphics.rectangle("fill", X + 2, iy, MenuW - 4, ItemH)
+                    end
+                    local iconPath = e.ClassName and string.format("Assets/Instances/%s.png", e.ClassName) or nil
+                    local textX = X + 10
+                    if iconPath then
+                        local img = InsertIconCache[iconPath]
+                        if img == nil then
+                            local ok, loaded = pcall(love.graphics.newImage, iconPath)
+                            img = (ok and loaded) or false
+                            InsertIconCache[iconPath] = img
+                        end
+                        if img then
+                            love.graphics.setColor(1, 1, 1, 1)
+                            love.graphics.draw(img, X + 6, iy + 3, 0, 16 / math.max(img:getWidth(), 1), 16 / math.max(img:getHeight(), 1))
+                            textX = X + 26
+                        end
+                    end
+                    love.graphics.setColor(0.9, 0.9, 0.92, 1)
+                    pcall(love.graphics.print, e.ClassName or "", textX, iy + 4)
                 end
-                MenuIconCache[iconPath] = img
             end
-
-            if img then
-                love.graphics.setColor(1, 1, 1, 1)
-                love.graphics.draw(img, X + 8, iy + 3, 0, 16 / img:getWidth(), 16 / img:getHeight())
-            else
-                love.graphics.setColor(0.35, 0.55, 0.85, 1)
-                love.graphics.rectangle("fill", X + 8, iy + 3, 16, 16)
-            end
-
-            love.graphics.setColor(1, 1, 1, 1)
-            pcall(love.graphics.print, tostring(e.ClassName or ""), X + 30, iy + 3)
         end
     end
+    love.graphics.setScissor()
+
+    if maxScroll > 0 then
+        local barH = math.max(16, listH * (listH / listContentH))
+        local barY = listTop + (InsertMenu.ScrollY / maxScroll) * (listH - barH)
+        love.graphics.setColor(0.4, 0.4, 0.45, 0.9)
+        love.graphics.rectangle("fill", X + MenuW - 6, barY, 3, barH)
+    end
+
+    InsertMenu.Entries = entries
 end
 
 function Explorer:HitTestRow(MouseX, MouseY)
     if not ContainerFrame then
         return nil
     end
-    -- Rows are in panel coordinates relative to list; use absolute via love mouse vs frame layout
     return nil
 end
-
--- ---------------------------------------------------------------------------
--- Drag & drop reparenting
--- ---------------------------------------------------------------------------
 
 function Explorer:BeginDrag(Node, X, Y)
     if not Node or IsBlacklisted(Node) then
@@ -1371,6 +1427,18 @@ function Explorer:DrawDragGhost()
         label = label:sub(1, 21) .. "..."
     end
     pcall(love.graphics.print, label, X + 36, Y + 6)
+end
+
+local _OldSetSelection = Explorer.SetSelection
+function Explorer:SetSelection(Node, Multi)
+    local P = _G.Properties
+    if P and P.IsObjectPicking and P:IsObjectPicking() then
+        if Node then
+            P:TryAssignObject(Node)
+        end
+        return
+    end
+    return _OldSetSelection(self, Node, Multi)
 end
 
 return Explorer

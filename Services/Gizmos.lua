@@ -10,20 +10,17 @@ Gizmos.HandleScreenLen = 80
 Gizmos.HandleHitPad = 12
 Gizmos.RingSegments = 64
 Gizmos.RingWorldScale = 0.55
+Gizmos.Space = "Local"
 
 local AXIS = {
     X = {1, 0, 0, 1.00, 0.28, 0.28},
     Y = {0, 1, 0, 0.28, 1.00, 0.38},
     Z = {0, 0, 1, 0.32, 0.48, 1.00},
 }
-local AXIS_ORDER = { "X", "Y", "Z" }
+local AXIS_ORDER = { "Z", "Y", "X" }
 
 local Active = nil
 local Hover = nil
-
--- ===========================================================================
--- Projector (OOP world ↔ screen, same math as Pixel shader)
--- ===========================================================================
 
 local Projector = {}
 Projector.__index = Projector
@@ -31,7 +28,8 @@ Projector.__index = Projector
 function Projector.new(Camera)
     local Pos = Camera:GetAttribute("Position") or {0, 4, 0}
     local Rot = Camera:GetAttribute("Rotation") or {0, 0, 0}
-    local Fov = Camera:GetAttribute("Fov") or (math.pi / 1.75)
+    local FovDeg = Camera.FieldOfView or 105
+    local Fov = math.rad(FovDeg)
     local Cf = CFrame.FromPositionRotation(Pos, Rot[1] or 0, Rot[2] or 0)
     local W, H = love.graphics.getDimensions()
     return setmetatable({
@@ -46,308 +44,322 @@ function Projector.new(Camera)
     }, Projector)
 end
 
--- World → screen. Inverse of:
---   Uv = (Screen - 0.5*Res) / Res.y
---   Ray = normalize(Fwd + Right*Uv.x*TanFov - Up*Uv.y*TanFov)
-function Projector:Project(wx, wy, wz)
-    local dx = wx - self.Pos[1]
-    local dy = wy - self.Pos[2]
-    local dz = wz - self.Pos[3]
-    local z = dx * self.Forward[1] + dy * self.Forward[2] + dz * self.Forward[3]
-    if z < 0.12 then
+function Projector:Project(Wx, Wy, Wz)
+    local Dx = Wx - self.Pos[1]
+    local Dy = Wy - self.Pos[2]
+    local Dz = Wz - self.Pos[3]
+    local Z = Dx * self.Forward[1] + Dy * self.Forward[2] + Dz * self.Forward[3]
+    if Z < 0.12 then
         return nil
     end
-    local x = dx * self.Right[1] + dy * self.Right[2] + dz * self.Right[3]
-    local y = dx * self.Up[1] + dy * self.Up[2] + dz * self.Up[3]
-    local sx = self.W * 0.5 + (x / (z * self.TanFov)) * self.H
-    local sy = self.H * 0.5 + (-y / (z * self.TanFov)) * self.H
-    return sx, sy, z
+    local X = Dx * self.Right[1] + Dy * self.Right[2] + Dz * self.Right[3]
+    local Y = Dx * self.Up[1] + Dy * self.Up[2] + Dz * self.Up[3]
+    local Sx = self.W * 0.5 + (X / (Z * self.TanFov)) * self.H
+    local Sy = self.H * 0.5 + (-Y / (Z * self.TanFov)) * self.H
+    return Sx, Sy, Z
 end
 
-function Projector:ProjectV(v)
-    return self:Project(v[1], v[2], v[3])
+function Projector:ProjectV(V)
+    return self:Project(V[1], V[2], V[3])
 end
 
-function Projector:Ray(screenX, screenY)
-    local uvx = (screenX - 0.5 * self.W) / self.H
-    local uvy = (screenY - 0.5 * self.H) / self.H
-    local rd = {
-        self.Forward[1] + self.Right[1] * uvx * self.TanFov - self.Up[1] * uvy * self.TanFov,
-        self.Forward[2] + self.Right[2] * uvx * self.TanFov - self.Up[2] * uvy * self.TanFov,
-        self.Forward[3] + self.Right[3] * uvx * self.TanFov - self.Up[3] * uvy * self.TanFov,
+function Projector:Ray(ScreenX, ScreenY)
+    local Uvx = (ScreenX - 0.5 * self.W) / self.H
+    local Uvy = (ScreenY - 0.5 * self.H) / self.H
+    local Rd = {
+        self.Forward[1] + self.Right[1] * Uvx * self.TanFov - self.Up[1] * Uvy * self.TanFov,
+        self.Forward[2] + self.Right[2] * Uvx * self.TanFov - self.Up[2] * Uvy * self.TanFov,
+        self.Forward[3] + self.Right[3] * Uvx * self.TanFov - self.Up[3] * Uvy * self.TanFov,
     }
-    local len = math.sqrt(rd[1] * rd[1] + rd[2] * rd[2] + rd[3] * rd[3])
-    if len < 1e-8 then len = 1 end
-    return self.Pos, { rd[1] / len, rd[2] / len, rd[3] / len }
+    local Len = math.sqrt(Rd[1] * Rd[1] + Rd[2] * Rd[2] + Rd[3] * Rd[3])
+    if Len < 1e-8 then Len = 1 end
+    return self.Pos, { Rd[1] / Len, Rd[2] / Len, Rd[3] / Len }
 end
 
-function Projector:WorldPerPixel(depth)
-    return (2 * depth * self.TanFov) / self.H
+function Projector:WorldPerPixel(Depth)
+    return (2 * Depth * self.TanFov) / self.H
 end
 
 Gizmos.Projector = Projector
 
--- ===========================================================================
--- Helpers
--- ===========================================================================
-
-local function ToArr3(v)
-    if not v then return 0, 0, 0 end
-    if type(v) == "table" and v.ToArray then
-        local a = v:ToArray()
-        return a[1] or 0, a[2] or 0, a[3] or 0
+local function ToArr3(V)
+    if not V then return 0, 0, 0 end
+    if type(V) == "table" and V.ToArray then
+        local A = V:ToArray()
+        return A[1] or 0, A[2] or 0, A[3] or 0
     end
-    if type(v) == "table" then
-        return tonumber(v[1] or v.Px or v.X) or 0,
-               tonumber(v[2] or v.Py or v.Y) or 0,
-               tonumber(v[3] or v.Pz or v.Z) or 0
+    if type(V) == "table" then
+        return tonumber(V[1] or V.Px or V.X) or 0,
+               tonumber(V[2] or V.Py or V.Y) or 0,
+               tonumber(V[3] or V.Pz or V.Z) or 0
     end
     return 0, 0, 0
 end
 
 local function GetSelection()
-    local part = nil
+    local Part = nil
     if _G.SelectionHighlight and _G.SelectionHighlight.Adornee then
-        part = _G.SelectionHighlight.Adornee
+        Part = _G.SelectionHighlight.Adornee
     end
-    if not part and _G.SelectionSet then
-        for n, _ in pairs(_G.SelectionSet) do
-            if n and n.IsA and (n:IsA("BasePart") or n:IsA("Part")) then
-                part = n
+    if not Part and _G.SelectionSet then
+        for N, _ in pairs(_G.SelectionSet) do
+            if N and N.IsA and (N:IsA("BasePart") or N:IsA("Part")) then
+                Part = N
                 break
             end
         end
     end
-    if part and part.IsA and (part:IsA("BasePart") or part:IsA("Part")) and part.Locked ~= true then
-        return part
+    if Part and Part.IsA and (Part:IsA("BasePart") or Part:IsA("Part")) and Part.Locked ~= true then
+        return Part
     end
     return nil
 end
 
-local function Snap(v, size)
-    size = size or Gizmos.SnapSize
-    if not size or size <= 0 then return v end
-    return math.floor(v / size + 0.5) * size
+local function Snap(V, Size)
+    Size = Size or Gizmos.SnapSize
+    if not Size or Size <= 0 then return V end
+    return math.floor(V / Size + 0.5) * Size
 end
 
-local function SnapDeg(deg, step)
-    step = step or Gizmos.RotateSnapDeg
-    if not step or step <= 0 then return deg end
-    return math.floor(deg / step + 0.5) * step
+local function SnapDeg(Deg, Step)
+    Step = Step or Gizmos.RotateSnapDeg
+    if not Step or Step <= 0 then return Deg end
+    return math.floor(Deg / Step + 0.5) * Step
 end
 
-local function Dist2(ax, ay, bx, by)
-    local dx, dy = ax - bx, ay - by
-    return dx * dx + dy * dy
+local function Dist2(Ax, Ay, Bx, By)
+    local Dx, Dy = Ax - Bx, Ay - By
+    return Dx * Dx + Dy * Dy
 end
 
-local function DistPointSeg(px, py, x1, y1, x2, y2)
-    local dx, dy = x2 - x1, y2 - y1
-    local len2 = dx * dx + dy * dy
-    local t = 0
-    if len2 > 1e-8 then
-        t = math.max(0, math.min(1, ((px - x1) * dx + (py - y1) * dy) / len2))
+local function DistPointSeg(Px, Py, X1, Y1, X2, Y2)
+    local Dx, Dy = X2 - X1, Y2 - Y1
+    local Len2 = Dx * Dx + Dy * Dy
+    local T = 0
+    if Len2 > 1e-8 then
+        T = math.max(0, math.min(1, ((Px - X1) * Dx + (Py - Y1) * Dy) / Len2))
     end
-    local cx = x1 + t * dx
-    local cy = y1 + t * dy
-    return Dist2(px, py, cx, cy)
+    local Cx = X1 + T * Dx
+    local Cy = Y1 + T * Dy
+    return Dist2(Px, Py, Cx, Cy)
 end
 
--- ===========================================================================
--- Handle geometry
--- ===========================================================================
+local function GetPartOrientation(Part)
+    local Ox, Oy, Oz = ToArr3(Part.Orientation)
+    return { Ox or 0, Oy or 0, Oz or 0 }
+end
 
-local function BuildHandles(proj, part, tool)
-    local px, py, pz = ToArr3(part.Position)
-    local ox, oy, depth = proj:Project(px, py, pz)
-    if not ox then return nil end
+local function LocalAxisDir(Name, Orientation)
+    local A = AXIS[Name]
+    local Local = { A[1], A[2], A[3] }
+    if Gizmos.Space == "Local" and Orientation then
+        return CFrame.RotateByOrientation(Local, Orientation)
+    end
+    return Local
+end
 
-    local axisWorld = proj:WorldPerPixel(depth) * Gizmos.HandleScreenLen
-    local handles = {
-        origin = { px, py, pz },
-        originScreen = { ox, oy },
-        depth = depth,
-        axisWorld = axisWorld,
-        tool = tool,
-        axes = {},
-        rings = {},
+local function BuildHandles(Proj, Part, Tool)
+    local Px, Py, Pz = ToArr3(Part.Position)
+    local Ox, Oy, Depth = Proj:Project(Px, Py, Pz)
+    if not Ox then return nil end
+
+    local Ori = GetPartOrientation(Part)
+    local AxisWorld = Proj:WorldPerPixel(Depth) * Gizmos.HandleScreenLen
+    local Handles = {
+        Origin = { Px, Py, Pz },
+        OriginScreen = { Ox, Oy },
+        Depth = Depth,
+        AxisWorld = AxisWorld,
+        Tool = Tool,
+        Orientation = Ori,
+        CamPos = { Proj.Pos[1], Proj.Pos[2], Proj.Pos[3] },
+        Axes = {},
+        Rings = {},
     }
 
-    for _, name in ipairs(AXIS_ORDER) do
-        local a = AXIS[name]
-        local tip = {
-            px + a[1] * axisWorld,
-            py + a[2] * axisWorld,
-            pz + a[3] * axisWorld,
+    for _, Name in ipairs(AXIS_ORDER) do
+        local A = AXIS[Name]
+        local Dir = LocalAxisDir(Name, Ori)
+        local Tip = {
+            Px + Dir[1] * AxisWorld,
+            Py + Dir[2] * AxisWorld,
+            Pz + Dir[3] * AxisWorld,
         }
-        local tx, ty = proj:Project(tip[1], tip[2], tip[3])
-        if tx then
-            handles.axes[name] = {
-                name = name,
-                dir = { a[1], a[2], a[3] },
-                color = { a[4], a[5], a[6] },
-                tip = tip,
-                tipScreen = { tx, ty },
-                baseScreen = { ox, oy },
+        local Tx, Ty = Proj:Project(Tip[1], Tip[2], Tip[3])
+        if Tx then
+            Handles.Axes[Name] = {
+                Name = Name,
+                Dir = Dir,
+                Color = { A[4], A[5], A[6] },
+                Tip = Tip,
+                TipScreen = { Tx, Ty },
+                BaseScreen = { Ox, Oy },
             }
         end
     end
 
-    if tool == "Rotate" then
-        local radius = axisWorld * Gizmos.RingWorldScale
-        for _, name in ipairs(AXIS_ORDER) do
-            local a = AXIS[name]
-            local pts = {}
-            local segs = Gizmos.RingSegments
-            local ux, uy, uz, vx, vy, vz
-            if name == "X" then
-                ux, uy, uz = 0, 1, 0
-                vx, vy, vz = 0, 0, 1
-            elseif name == "Y" then
-                ux, uy, uz = 1, 0, 0
-                vx, vy, vz = 0, 0, 1
+    if Tool == "Rotate" then
+        local Radius = AxisWorld * Gizmos.RingWorldScale
+        for _, Name in ipairs(AXIS_ORDER) do
+            local A = AXIS[Name]
+            local AxisDir = LocalAxisDir(Name, Ori)
+            local U, V
+            if Name == "X" then
+                U = LocalAxisDir("Y", Ori)
+                V = LocalAxisDir("Z", Ori)
+            elseif Name == "Y" then
+                U = LocalAxisDir("X", Ori)
+                V = LocalAxisDir("Z", Ori)
             else
-                ux, uy, uz = 1, 0, 0
-                vx, vy, vz = 0, 1, 0
+                U = LocalAxisDir("X", Ori)
+                V = LocalAxisDir("Y", Ori)
             end
-            for i = 0, segs do
-                local t = (i / segs) * math.pi * 2
-                local c, s = math.cos(t), math.sin(t)
-                local wx = px + (ux * c + vx * s) * radius
-                local wy = py + (uy * c + vy * s) * radius
-                local wz = pz + (uz * c + vz * s) * radius
-                local sx, sy = proj:Project(wx, wy, wz)
-                if sx then
-                    pts[#pts + 1] = { sx, sy }
+            local Pts = {}
+            local Segs = Gizmos.RingSegments
+            for I = 0, Segs do
+                local T = (I / Segs) * math.pi * 2
+                local C, S = math.cos(T), math.sin(T)
+                local Wx = Px + (U[1] * C + V[1] * S) * Radius
+                local Wy = Py + (U[2] * C + V[2] * S) * Radius
+                local Wz = Pz + (U[3] * C + V[3] * S) * Radius
+                local Sx, Sy = Proj:Project(Wx, Wy, Wz)
+                if Sx then
+                    Pts[#Pts + 1] = { Sx, Sy }
                 else
-                    pts[#pts + 1] = nil
+                    Pts[#Pts + 1] = nil
                 end
             end
-            handles.rings[name] = {
-                name = name,
-                color = { a[4], a[5], a[6] },
-                axis = { a[1], a[2], a[3] },
-                radius = radius,
-                pts = pts,
+            Handles.Rings[Name] = {
+                Name = Name,
+                Color = { A[4], A[5], A[6] },
+                Axis = AxisDir,
+                Radius = Radius,
+                Pts = Pts,
             }
         end
     end
 
-    return handles
+    return Handles
 end
 
-local function HitTest(handles, mx, my, tool)
-    if not handles then return nil end
-    local best, bestD = nil, (Gizmos.HandleHitPad + 2) ^ 2
+local function HitTest(Handles, Mx, My, Tool)
+    if not Handles then return nil end
+    local Best, BestD = nil, (Gizmos.HandleHitPad + 2) ^ 2
 
-    if tool == "Move" or tool == "Scale" then
-        for _, name in ipairs(AXIS_ORDER) do
-            local ax = handles.axes[name]
-            if ax then
-                local d = DistPointSeg(mx, my, ax.baseScreen[1], ax.baseScreen[2], ax.tipScreen[1], ax.tipScreen[2])
-                if d < bestD then
-                    bestD = d
-                    best = { mode = tool, axis = name, kind = "axis" }
+    if Tool == "Move" or Tool == "Scale" then
+        for _, Name in ipairs(AXIS_ORDER) do
+            local Ax = Handles.Axes[Name]
+            if Ax then
+                local D = DistPointSeg(Mx, My, Ax.BaseScreen[1], Ax.BaseScreen[2], Ax.TipScreen[1], Ax.TipScreen[2])
+                if D < BestD then
+                    BestD = D
+                    Best = { Mode = Tool, Axis = Name, Kind = "Axis" }
                 end
-                local dTip = Dist2(mx, my, ax.tipScreen[1], ax.tipScreen[2])
-                if dTip < bestD then
-                    bestD = dTip
-                    best = { mode = tool, axis = name, kind = "axis" }
+                local DTip = Dist2(Mx, My, Ax.TipScreen[1], Ax.TipScreen[2])
+                if DTip < BestD then
+                    BestD = DTip
+                    Best = { Mode = Tool, Axis = Name, Kind = "Axis" }
                 end
             end
         end
 
-        if tool == "Move" then
-            local planes = {
+        if Tool == "Move" then
+            local Planes = {
                 { "XY", "X", "Y" },
                 { "XZ", "X", "Z" },
                 { "YZ", "Y", "Z" },
             }
-            local ox, oy = handles.originScreen[1], handles.originScreen[2]
-            for _, info in ipairs(planes) do
-                local a = handles.axes[info[2]]
-                local b = handles.axes[info[3]]
-                if a and b then
-                    local ax = ox + (a.tipScreen[1] - ox) * 0.32
-                    local ay = oy + (a.tipScreen[2] - oy) * 0.32
-                    local bx = ox + (b.tipScreen[1] - ox) * 0.32
-                    local by = oy + (b.tipScreen[2] - oy) * 0.32
-                    local cx = ax + (bx - ox)
-                    local cy = ay + (by - oy)
-                    local mxp = (ox + cx) * 0.5
-                    local myp = (oy + cy) * 0.5
-                    local d = Dist2(mx, my, mxp, myp)
-                    if d < bestD and d < 16 * 16 then
-                        bestD = d
-                        best = { mode = "Move", plane = info[1], kind = "plane" }
+            local Ox, Oy = Handles.OriginScreen[1], Handles.OriginScreen[2]
+            for _, Info in ipairs(Planes) do
+                local A = Handles.Axes[Info[2]]
+                local B = Handles.Axes[Info[3]]
+                if A and B then
+                    local Ax = Ox + (A.TipScreen[1] - Ox) * 0.32
+                    local Ay = Oy + (A.TipScreen[2] - Oy) * 0.32
+                    local Bx = Ox + (B.TipScreen[1] - Ox) * 0.32
+                    local By = Oy + (B.TipScreen[2] - Oy) * 0.32
+                    local Cx = Ax + (Bx - Ox)
+                    local Cy = Ay + (By - Oy)
+                    local Mxp = (Ox + Cx) * 0.5
+                    local Myp = (Oy + Cy) * 0.5
+                    local D = Dist2(Mx, My, Mxp, Myp)
+                    if D < BestD and D < 16 * 16 then
+                        BestD = D
+                        Best = { Mode = "Move", Plane = Info[1], Kind = "Plane" }
                     end
                 end
             end
         end
-    elseif tool == "Rotate" then
-        for _, name in ipairs(AXIS_ORDER) do
-            local ring = handles.rings[name]
-            if ring then
-                local pts = ring.pts
-                for i = 1, #pts - 1 do
-                    local p0, p1 = pts[i], pts[i + 1]
-                    if p0 and p1 then
-                        local d = DistPointSeg(mx, my, p0[1], p0[2], p1[1], p1[2])
-                        if d < bestD then
-                            bestD = d
-                            best = { mode = "Rotate", axis = name, kind = "ring" }
+    elseif Tool == "Rotate" then
+        for _, Name in ipairs(AXIS_ORDER) do
+            local Ring = Handles.Rings[Name]
+            if Ring then
+                local Pts = Ring.Pts
+                for I = 1, #Pts - 1 do
+                    local P0, P1 = Pts[I], Pts[I + 1]
+                    if P0 and P1 then
+                        local D = DistPointSeg(Mx, My, P0[1], P0[2], P1[1], P1[2])
+                        if D < BestD then
+                            BestD = D
+                            Best = { Mode = "Rotate", Axis = Name, Kind = "Ring" }
                         end
                     end
                 end
             end
         end
     end
-    return best
+    return Best
 end
 
-local function ScreenAxisDelta(proj, handles, axisName, mx, my, startMx, startMy)
-    local ax = handles.axes[axisName]
-    if not ax then return 0 end
-    local dx = ax.tipScreen[1] - ax.baseScreen[1]
-    local dy = ax.tipScreen[2] - ax.baseScreen[2]
-    local len = math.sqrt(dx * dx + dy * dy)
-    if len < 1e-4 then return 0 end
-    dx, dy = dx / len, dy / len
-    local mdx = mx - startMx
-    local mdy = my - startMy
-    local pixelsAlong = mdx * dx + mdy * dy
-    return pixelsAlong * proj:WorldPerPixel(handles.depth)
+local function ScreenAxisDelta(Proj, Handles, AxisName, Mx, My, StartMx, StartMy)
+    local Ax = Handles.Axes[AxisName]
+    if not Ax then return 0 end
+    local Dx = Ax.TipScreen[1] - Ax.BaseScreen[1]
+    local Dy = Ax.TipScreen[2] - Ax.BaseScreen[2]
+    local Len = math.sqrt(Dx * Dx + Dy * Dy)
+    if Len < 1e-4 then return 0 end
+    Dx, Dy = Dx / Len, Dy / Len
+    local Mdx = Mx - StartMx
+    local Mdy = My - StartMy
+    local PixelsAlong = Mdx * Dx + Mdy * Dy
+    return PixelsAlong * Proj:WorldPerPixel(Handles.Depth)
 end
 
-local function PlaneHit(proj, mx, my, origin, plane)
-    local Ro, Rd = proj:Ray(mx, my)
-    local n
-    if plane == "XY" then n = {0, 0, 1}
-    elseif plane == "XZ" then n = {0, 1, 0}
-    else n = {1, 0, 0} end
-    local denom = n[1] * Rd[1] + n[2] * Rd[2] + n[3] * Rd[3]
-    if math.abs(denom) < 1e-8 then return nil end
-    local t = ((origin[1] - Ro[1]) * n[1] + (origin[2] - Ro[2]) * n[2] + (origin[3] - Ro[3]) * n[3]) / denom
-    if t < 0.05 then return nil end
+local function PlaneHit(Proj, Mx, My, Origin, Plane, Orientation)
+    local Ro, Rd = Proj:Ray(Mx, My)
+    local N
+    if Gizmos.Space == "Local" and Orientation then
+        if Plane == "XY" then
+            N = LocalAxisDir("Z", Orientation)
+        elseif Plane == "XZ" then
+            N = LocalAxisDir("Y", Orientation)
+        else
+            N = LocalAxisDir("X", Orientation)
+        end
+    else
+        if Plane == "XY" then N = {0, 0, 1}
+        elseif Plane == "XZ" then N = {0, 1, 0}
+        else N = {1, 0, 0} end
+    end
+    local Denom = N[1] * Rd[1] + N[2] * Rd[2] + N[3] * Rd[3]
+    if math.abs(Denom) < 1e-8 then return nil end
+    local T = ((Origin[1] - Ro[1]) * N[1] + (Origin[2] - Ro[2]) * N[2] + (Origin[3] - Ro[3]) * N[3]) / Denom
+    if T < 0.05 then return nil end
     return {
-        Ro[1] + Rd[1] * t,
-        Ro[2] + Rd[2] * t,
-        Ro[3] + Rd[3] * t,
+        Ro[1] + Rd[1] * T,
+        Ro[2] + Rd[2] * T,
+        Ro[3] + Rd[3] * T,
     }
 end
 
-local function PoseProxy(pos, size, ori)
+local function PoseProxy(Pos, Size, Ori)
     return {
-        Position = Vector3.new(pos[1], pos[2], pos[3]),
-        Size = size,
-        Orientation = ori,
-        IsA = function(_, c) return c == "BasePart" or c == "Part" end,
+        Position = Vector3.new(Pos[1], Pos[2], Pos[3]),
+        Size = Size,
+        Orientation = Ori,
+        IsA = function(_, C) return C == "BasePart" or C == "Part" end,
     }
 end
-
--- ===========================================================================
--- Input
--- ===========================================================================
 
 function Gizmos.IsActive()
     return Active ~= nil
@@ -357,146 +369,183 @@ function Gizmos.GetHover()
     return Hover
 end
 
-function Gizmos.MousePressed(Camera, mx, my)
-    local tool = Tools:GetTool()
-    if tool ~= "Move" and tool ~= "Scale" and tool ~= "Rotate" then
+function Gizmos.SetSpace(Space)
+    if Space == "Local" or Space == "World" then
+        Gizmos.Space = Space
+    end
+end
+
+function Gizmos.MousePressed(Camera, Mx, My)
+    local Tool = Tools:GetTool()
+    if Tool ~= "Move" and Tool ~= "Scale" and Tool ~= "Rotate" then
         return false
     end
-    local part = GetSelection()
-    if not part then return false end
+    local Part = GetSelection()
+    if not Part then return false end
 
-    local proj = Projector.new(Camera)
-    local handles = BuildHandles(proj, part, tool)
-    local hit = HitTest(handles, mx, my, tool)
-    if not hit then return false end
+    local Proj = Projector.new(Camera)
+    local Handles = BuildHandles(Proj, Part, Tool)
+    local Hit = HitTest(Handles, Mx, My, Tool)
+    if not Hit then return false end
 
-    local px, py, pz = ToArr3(part.Position)
-    local sx, sy, sz = ToArr3(part.Size)
-    local ox, oy, oz = ToArr3(part.Orientation)
+    local Px, Py, Pz = ToArr3(Part.Position)
+    local Sx, Sy, Sz = ToArr3(Part.Size)
+    local Ox, Oy, Oz = ToArr3(Part.Orientation)
+    local Ori = { Ox or 0, Oy or 0, Oz or 0 }
+
+    if Part.ClassName == "UnionOperation" and type(rawget(Part, "SolidPieces")) == "table" then
+        local Copy = {}
+        for I = 1, #Part.SolidPieces do
+            local Sp = Part.SolidPieces[I]
+            Copy[I] = {
+                Position = {(Sp.Position and Sp.Position[1]) or 0, (Sp.Position and Sp.Position[2]) or 0, (Sp.Position and Sp.Position[3]) or 0},
+                Size = {(Sp.Size and Sp.Size[1]) or 1, (Sp.Size and Sp.Size[2]) or 1, (Sp.Size and Sp.Size[3]) or 1},
+            }
+        end
+        rawset(Part, "_GizmoStartSolids", Copy)
+    end
 
     Active = {
-        part = part,
-        tool = tool,
-        hit = hit,
-        startPos = { px, py, pz },
-        startSize = { sx, sy, sz },
-        startOri = { ox or 0, oy or 0, oz or 0 },
-        origin = { px, py, pz },
-        mouseStart = { mx, my },
+        Part = Part,
+        Tool = Tool,
+        Hit = Hit,
+        StartPos = { Px, Py, Pz },
+        StartSize = { Sx, Sy, Sz },
+        StartOri = Ori,
+        Origin = { Px, Py, Pz },
+        Orientation = Ori,
+        MouseStart = { Mx, My },
     }
 
-    if hit.kind == "plane" then
-        Active.startPlanePt = PlaneHit(proj, mx, my, Active.origin, hit.plane)
-    elseif hit.kind == "ring" then
-        local oxs, oys = handles.originScreen[1], handles.originScreen[2]
-        Active.startAngle = math.atan2(my - oys, mx - oxs)
-        Active.ringOriginScreen = { oxs, oys }
+    if Hit.Kind == "Plane" then
+        Active.StartPlanePt = PlaneHit(Proj, Mx, My, Active.Origin, Hit.Plane, Ori)
+    elseif Hit.Kind == "Ring" then
+        local Oxs, Oys = Handles.OriginScreen[1], Handles.OriginScreen[2]
+        Active.StartAngle = math.atan2(My - Oys, Mx - Oxs)
+        Active.RingOriginScreen = { Oxs, Oys }
+    elseif Hit.Kind == "Axis" then
+        Active.StartAxisDelta = ScreenAxisDelta(Proj, Handles, Hit.Axis, Mx, My, Mx, My)
     end
     return true
 end
 
-function Gizmos.MouseMoved(Camera, mx, my)
-    local tool = Tools:GetTool()
-    if tool ~= "Move" and tool ~= "Scale" and tool ~= "Rotate" then
+function Gizmos.MouseMoved(Camera, Mx, My)
+    local Tool = Tools:GetTool()
+    if Tool ~= "Move" and Tool ~= "Scale" and Tool ~= "Rotate" then
         Hover = nil
         if not Active then return false end
     end
 
-    local proj = Projector.new(Camera)
+    local Proj = Projector.new(Camera)
 
     if not Active then
-        local part = GetSelection()
-        if part then
-            local handles = BuildHandles(proj, part, tool)
-            Hover = HitTest(handles, mx, my, tool)
+        local Part = GetSelection()
+        if Part then
+            local Handles = BuildHandles(Proj, Part, Tool)
+            Hover = HitTest(Handles, Mx, My, Tool)
         else
             Hover = nil
         end
         return false
     end
 
-    local part = Active.part
-    if not part then
+    local Part = Active.Part
+    if not Part then
         Active = nil
         return true
     end
 
-    local startHandles = BuildHandles(proj, PoseProxy(Active.startPos, part.Size, part.Orientation), Active.tool)
-    if not startHandles then
+    local StartHandles = BuildHandles(Proj, PoseProxy(Active.StartPos, Part.Size, Part.Orientation), Active.Tool)
+    if not StartHandles then
         return true
     end
 
-    if Active.tool == "Move" then
-        if Active.hit.kind == "axis" then
-            local delta = ScreenAxisDelta(proj, startHandles, Active.hit.axis, mx, my,
-                Active.mouseStart[1], Active.mouseStart[2])
-            local dir = AXIS[Active.hit.axis]
-            local nx = Active.startPos[1] + dir[1] * delta
-            local ny = Active.startPos[2] + dir[2] * delta
-            local nz = Active.startPos[3] + dir[3] * delta
-            if dir[1] ~= 0 then nx = Snap(nx) end
-            if dir[2] ~= 0 then ny = Snap(ny) end
-            if dir[3] ~= 0 then nz = Snap(nz) end
-            part.Position = Vector3.new(nx, ny, nz)
-        elseif Active.hit.kind == "plane" and Active.startPlanePt then
-            local pt = PlaneHit(proj, mx, my, Active.origin, Active.hit.plane)
-            if pt then
-                local dx = pt[1] - Active.startPlanePt[1]
-                local dy = pt[2] - Active.startPlanePt[2]
-                local dz = pt[3] - Active.startPlanePt[3]
-                local plane = Active.hit.plane
-                local nx = Active.startPos[1] + dx
-                local ny = Active.startPos[2] + dy
-                local nz = Active.startPos[3] + dz
-                if plane == "XY" then
-                    nz = Active.startPos[3]
-                    nx, ny = Snap(nx), Snap(ny)
-                elseif plane == "XZ" then
-                    ny = Active.startPos[2]
-                    nx, nz = Snap(nx), Snap(nz)
+    if Active.Tool == "Move" then
+        if Active.Hit.Kind == "Axis" then
+            local Delta = ScreenAxisDelta(Proj, StartHandles, Active.Hit.Axis, Mx, My,
+                Active.MouseStart[1], Active.MouseStart[2])
+            local Dir = LocalAxisDir(Active.Hit.Axis, Active.Orientation)
+            local Nx = Active.StartPos[1] + Dir[1] * Delta
+            local Ny = Active.StartPos[2] + Dir[2] * Delta
+            local Nz = Active.StartPos[3] + Dir[3] * Delta
+            if math.abs(Dir[1]) > 0.5 then Nx = Snap(Nx) end
+            if math.abs(Dir[2]) > 0.5 then Ny = Snap(Ny) end
+            if math.abs(Dir[3]) > 0.5 then Nz = Snap(Nz) end
+            Part.Position = Vector3.new(Nx, Ny, Nz)
+        elseif Active.Hit.Kind == "Plane" and Active.StartPlanePt then
+            local Pt = PlaneHit(Proj, Mx, My, Active.Origin, Active.Hit.Plane, Active.Orientation)
+            if Pt then
+                local Dx = Pt[1] - Active.StartPlanePt[1]
+                local Dy = Pt[2] - Active.StartPlanePt[2]
+                local Dz = Pt[3] - Active.StartPlanePt[3]
+                local Nx = Active.StartPos[1] + Dx
+                local Ny = Active.StartPos[2] + Dy
+                local Nz = Active.StartPos[3] + Dz
+                local Ax = LocalAxisDir("X", Active.Orientation)
+                local Ay = LocalAxisDir("Y", Active.Orientation)
+                local Az = LocalAxisDir("Z", Active.Orientation)
+                local Plane = Active.Hit.Plane
+                local Off = { Dx, Dy, Dz }
+                local function Dot(A, B) return A[1]*B[1] + A[2]*B[2] + A[3]*B[3] end
+                if Plane == "XY" then
+                    local AlongZ = Dot(Off, Az)
+                    Nx = Nx - Az[1] * AlongZ
+                    Ny = Ny - Az[2] * AlongZ
+                    Nz = Nz - Az[3] * AlongZ
+                elseif Plane == "XZ" then
+                    local AlongY = Dot(Off, Ay)
+                    Nx = Nx - Ay[1] * AlongY
+                    Ny = Ny - Ay[2] * AlongY
+                    Nz = Nz - Ay[3] * AlongY
                 else
-                    nx = Active.startPos[1]
-                    ny, nz = Snap(ny), Snap(nz)
+                    local AlongX = Dot(Off, Ax)
+                    Nx = Nx - Ax[1] * AlongX
+                    Ny = Ny - Ax[2] * AlongX
+                    Nz = Nz - Ax[3] * AlongX
                 end
-                part.Position = Vector3.new(nx, ny, nz)
+                Part.Position = Vector3.new(Snap(Nx), Snap(Ny), Snap(Nz))
             end
         end
-    elseif Active.tool == "Scale" and Active.hit.kind == "axis" then
-        local delta = ScreenAxisDelta(proj, startHandles, Active.hit.axis, mx, my,
-            Active.mouseStart[1], Active.mouseStart[2])
-        local dir = AXIS[Active.hit.axis]
-        local nx, ny, nz = Active.startSize[1], Active.startSize[2], Active.startSize[3]
-        if dir[1] ~= 0 then nx = math.max(0.2, Snap(Active.startSize[1] + delta)) end
-        if dir[2] ~= 0 then ny = math.max(0.2, Snap(Active.startSize[2] + delta)) end
-        if dir[3] ~= 0 then nz = math.max(0.2, Snap(Active.startSize[3] + delta)) end
-        part.Size = Vector3.new(nx, ny, nz)
-        local ddx = (nx - Active.startSize[1]) * 0.5 * dir[1]
-        local ddy = (ny - Active.startSize[2]) * 0.5 * dir[2]
-        local ddz = (nz - Active.startSize[3]) * 0.5 * dir[3]
-        part.Position = Vector3.new(
-            Active.startPos[1] + ddx,
-            Active.startPos[2] + ddy,
-            Active.startPos[3] + ddz
+    elseif Active.Tool == "Scale" and Active.Hit.Kind == "Axis" then
+        local Delta = ScreenAxisDelta(Proj, StartHandles, Active.Hit.Axis, Mx, My,
+            Active.MouseStart[1], Active.MouseStart[2])
+        local Dir = LocalAxisDir(Active.Hit.Axis, Active.Orientation)
+        local Nx, Ny, Nz = Active.StartSize[1], Active.StartSize[2], Active.StartSize[3]
+        local Axis = Active.Hit.Axis
+        if Axis == "X" then Nx = math.max(0.2, Snap(Active.StartSize[1] + Delta)) end
+        if Axis == "Y" then Ny = math.max(0.2, Snap(Active.StartSize[2] + Delta)) end
+        if Axis == "Z" then Nz = math.max(0.2, Snap(Active.StartSize[3] + Delta)) end
+        Part.Size = Vector3.new(Nx, Ny, Nz)
+        ScaleUnionSolids(Part, Active.StartSize, {Nx, Ny, Nz})
+        local Ddx = (Nx - Active.StartSize[1]) * 0.5
+        local Ddy = (Ny - Active.StartSize[2]) * 0.5
+        local Ddz = (Nz - Active.StartSize[3]) * 0.5
+        local LocalOff = { Ddx, Ddy, Ddz }
+        local WorldOff = CFrame.RotateByOrientation(LocalOff, Active.Orientation)
+        Part.Position = Vector3.new(
+            Active.StartPos[1] + WorldOff[1],
+            Active.StartPos[2] + WorldOff[2],
+            Active.StartPos[3] + WorldOff[3]
         )
-    elseif Active.tool == "Rotate" and Active.hit.kind == "ring" then
-        local oxs = Active.ringOriginScreen[1]
-        local oys = Active.ringOriginScreen[2]
-        local ang = math.atan2(my - oys, mx - oxs)
-        local delta = ang - Active.startAngle
-        local deg = delta * 180 / math.pi
-        if Active.hit.axis == "X" or Active.hit.axis == "Z" then
-            deg = -deg
+    elseif Active.Tool == "Rotate" and Active.Hit.Kind == "Ring" then
+        local Oxs = Active.RingOriginScreen[1]
+        local Oys = Active.RingOriginScreen[2]
+        local Ang = math.atan2(My - Oys, Mx - Oxs)
+        local Delta = Ang - Active.StartAngle
+        local Deg = Delta * 180 / math.pi
+        if Active.Hit.Axis == "Z" then
+            Deg = -Deg
         end
-        deg = SnapDeg(deg)
-        local ori = {
-            Active.startOri[1],
-            Active.startOri[2],
-            Active.startOri[3],
+        Deg = SnapDeg(Deg)
+        local Ori = {
+            Active.StartOri[1],
+            Active.StartOri[2],
+            Active.StartOri[3],
         }
-        if Active.hit.axis == "X" then ori[1] = Active.startOri[1] + deg
-        elseif Active.hit.axis == "Y" then ori[2] = Active.startOri[2] + deg
-        else ori[3] = Active.startOri[3] + deg end
-        part.Orientation = Vector3.new(ori[1], ori[2], ori[3])
+        if Active.Hit.Axis == "X" then Ori[1] = Active.StartOri[1] + Deg
+        elseif Active.Hit.Axis == "Y" then Ori[2] = Active.StartOri[2] - Deg
+        else Ori[3] = Active.StartOri[3] + Deg end
+        Part.Orientation = Vector3.new(Ori[1], Ori[2], Ori[3])
     end
 
     pcall(function()
@@ -506,59 +555,55 @@ function Gizmos.MouseMoved(Camera, mx, my)
 end
 
 function Gizmos.MouseReleased()
-    local was = Active ~= nil
+    local Was = Active ~= nil
     Active = nil
-    return was
+    return Was
 end
 
--- ===========================================================================
--- Drawing — non-hovered first, hovered / active last (highest z)
--- ===========================================================================
-
-local function DrawArrow(x1, y1, x2, y2, r, g, b, thick, alpha)
-    love.graphics.setColor(r, g, b, alpha or 1)
-    love.graphics.setLineWidth(thick or 2.5)
-    love.graphics.line(x1, y1, x2, y2)
-    local dx, dy = x2 - x1, y2 - y1
-    local len = math.sqrt(dx * dx + dy * dy)
-    if len < 1 then
+local function DrawArrow(X1, Y1, X2, Y2, R, G, B, Thick, Alpha)
+    love.graphics.setColor(R, G, B, Alpha or 1)
+    love.graphics.setLineWidth(Thick or 2.5)
+    love.graphics.line(X1, Y1, X2, Y2)
+    local Dx, Dy = X2 - X1, Y2 - Y1
+    local Len = math.sqrt(Dx * Dx + Dy * Dy)
+    if Len < 1 then
         love.graphics.setLineWidth(1)
         return
     end
-    dx, dy = dx / len, dy / len
-    local px, py = -dy, dx
-    local hs = 10
+    Dx, Dy = Dx / Len, Dy / Len
+    local Px, Py = -Dy, Dx
+    local Hs = 10
     love.graphics.polygon("fill",
-        x2, y2,
-        x2 - dx * hs + px * hs * 0.5,
-        y2 - dy * hs + py * hs * 0.5,
-        x2 - dx * hs - px * hs * 0.5,
-        y2 - dy * hs - py * hs * 0.5
+        X2, Y2,
+        X2 - Dx * Hs + Px * Hs * 0.5,
+        Y2 - Dy * Hs + Py * Hs * 0.5,
+        X2 - Dx * Hs - Px * Hs * 0.5,
+        Y2 - Dy * Hs - Py * Hs * 0.5
     )
     love.graphics.setLineWidth(1)
 end
 
-local function DrawAxisArrow(ax, highlighted)
-    local thick = highlighted and 4.0 or 2.4
-    local alpha = highlighted and 1.0 or 0.88
+local function DrawAxisArrow(Ax, Highlighted)
+    local Thick = Highlighted and 4.0 or 2.4
+    local Alpha = Highlighted and 1.0 or 0.88
     DrawArrow(
-        ax.baseScreen[1], ax.baseScreen[2],
-        ax.tipScreen[1], ax.tipScreen[2],
-        ax.color[1], ax.color[2], ax.color[3],
-        thick, alpha
+        Ax.BaseScreen[1], Ax.BaseScreen[2],
+        Ax.TipScreen[1], Ax.TipScreen[2],
+        Ax.Color[1], Ax.Color[2], Ax.Color[3],
+        Thick, Alpha
     )
 end
 
-local function DrawRing(ring, highlighted)
-    local pts = ring.pts
-    local thick = highlighted and 3.6 or 2.0
-    local alpha = highlighted and 1.0 or 0.8
-    love.graphics.setColor(ring.color[1], ring.color[2], ring.color[3], alpha)
-    love.graphics.setLineWidth(thick)
-    for i = 1, #pts - 1 do
-        local p0, p1 = pts[i], pts[i + 1]
-        if p0 and p1 then
-            love.graphics.line(p0[1], p0[2], p1[1], p1[2])
+local function DrawRing(Ring, Highlighted)
+    local Pts = Ring.Pts
+    local Thick = Highlighted and 3.6 or 2.0
+    local Alpha = Highlighted and 1.0 or 0.8
+    love.graphics.setColor(Ring.Color[1], Ring.Color[2], Ring.Color[3], Alpha)
+    love.graphics.setLineWidth(Thick)
+    for I = 1, #Pts - 1 do
+        local P0, P1 = Pts[I], Pts[I + 1]
+        if P0 and P1 then
+            love.graphics.line(P0[1], P0[2], P1[1], P1[2])
         end
     end
     love.graphics.setLineWidth(1)
@@ -566,123 +611,119 @@ end
 
 function Gizmos.Render(Camera)
     if not Camera then return end
-    local tool = Tools:GetTool()
-    if tool ~= "Move" and tool ~= "Scale" and tool ~= "Rotate" then
+    local Tool = Tools:GetTool()
+    if Tool ~= "Move" and Tool ~= "Scale" and Tool ~= "Rotate" then
         return
     end
-    local part = GetSelection()
-    if not part then return end
+    local Part = GetSelection()
+    if not Part then return end
 
-    local proj = Projector.new(Camera)
-    local handles = BuildHandles(proj, part, tool)
-    if not handles then return end
+    local Proj = Projector.new(Camera)
+    local Handles = BuildHandles(Proj, Part, Tool)
+    if not Handles then return end
 
-    local hoverAxis = Hover and Hover.axis
-    local hoverPlane = Hover and Hover.plane
-    local activeAxis = Active and Active.hit and Active.hit.axis
-    local activePlane = Active and Active.hit and Active.hit.plane
-    local topAxis = activeAxis or hoverAxis
-    local topPlane = activePlane or hoverPlane
+    local TopAxis = nil
+    local TopPlane = nil
+    if Active and Active.Hit then
+        TopAxis = Active.Hit.Axis
+        TopPlane = Active.Hit.Plane
+    elseif Hover then
+        TopAxis = Hover.Axis
+        TopPlane = Hover.Plane
+    end
 
-    if tool == "Move" or tool == "Scale" then
-        -- 1) non-top planes under everything
-        if tool == "Move" then
-            local ox, oy = handles.originScreen[1], handles.originScreen[2]
-            local planes = {
-                { "XY", "X", "Y", 1, 1, 0.25 },
-                { "XZ", "X", "Z", 1, 0.35, 1 },
-                { "YZ", "Y", "Z", 0.25, 1, 1 },
-            }
-            for _, info in ipairs(planes) do
-                local a = handles.axes[info[2]]
-                local b = handles.axes[info[3]]
-                if a and b and info[1] ~= topPlane then
-                    local ax = ox + (a.tipScreen[1] - ox) * 0.32
-                    local ay = oy + (a.tipScreen[2] - oy) * 0.32
-                    local bx = ox + (b.tipScreen[1] - ox) * 0.32
-                    local by = oy + (b.tipScreen[2] - oy) * 0.32
-                    local cx = ax + (bx - ox)
-                    local cy = ay + (by - oy)
-                    love.graphics.setColor(info[4], info[5], info[6], 0.18)
-                    love.graphics.polygon("fill", ox, oy, ax, ay, cx, cy, bx, by)
-                    love.graphics.setColor(info[4], info[5], info[6], 0.55)
-                    love.graphics.setLineWidth(1.2)
-                    love.graphics.polygon("line", ox, oy, ax, ay, cx, cy, bx, by)
-                    love.graphics.setLineWidth(1)
-                end
-            end
-        end
-
-        -- 2) non-hovered axes
-        for _, name in ipairs(AXIS_ORDER) do
-            local ax = handles.axes[name]
-            if ax and name ~= topAxis then
-                DrawAxisArrow(ax, false)
-                if tool == "Scale" then
-                    love.graphics.setColor(ax.color[1], ax.color[2], ax.color[3], 0.9)
-                    love.graphics.rectangle("fill",
-                        ax.tipScreen[1] - 5, ax.tipScreen[2] - 5, 10, 10)
-                end
-            end
-        end
-
-        -- 3) center marker
-        local ox, oy = handles.originScreen[1], handles.originScreen[2]
-        love.graphics.setColor(0.95, 0.95, 0.25, 1)
-        love.graphics.rectangle("fill", ox - 4, oy - 4, 8, 8)
-
-        -- 4) hovered / active plane on top of other planes
-        if tool == "Move" and topPlane then
-            local planes = {
+    if Tool == "Move" or Tool == "Scale" then
+        if Tool == "Move" then
+            local Planes = {
                 XY = { "X", "Y", 1, 1, 0.25 },
                 XZ = { "X", "Z", 1, 0.35, 1 },
                 YZ = { "Y", "Z", 0.25, 1, 1 },
             }
-            local info = planes[topPlane]
-            local a = handles.axes[info[1]]
-            local b = handles.axes[info[2]]
-            if a and b then
-                local ax = ox + (a.tipScreen[1] - ox) * 0.32
-                local ay = oy + (a.tipScreen[2] - oy) * 0.32
-                local bx = ox + (b.tipScreen[1] - ox) * 0.32
-                local by = oy + (b.tipScreen[2] - oy) * 0.32
-                local cx = ax + (bx - ox)
-                local cy = ay + (by - oy)
-                love.graphics.setColor(info[3], info[4], info[5], 0.55)
-                love.graphics.polygon("fill", ox, oy, ax, ay, cx, cy, bx, by)
-                love.graphics.setColor(info[3], info[4], info[5], 1)
+            local Ox, Oy = Handles.OriginScreen[1], Handles.OriginScreen[2]
+            for PlaneName, Info in pairs(Planes) do
+                if PlaneName ~= TopPlane then
+                    local A = Handles.Axes[Info[1]]
+                    local B = Handles.Axes[Info[2]]
+                    if A and B then
+                        local Ax = Ox + (A.TipScreen[1] - Ox) * 0.32
+                        local Ay = Oy + (A.TipScreen[2] - Oy) * 0.32
+                        local Bx = Ox + (B.TipScreen[1] - Ox) * 0.32
+                        local By = Oy + (B.TipScreen[2] - Oy) * 0.32
+                        local Cx = Ax + (Bx - Ox)
+                        local Cy = Ay + (By - Oy)
+                        love.graphics.setColor(Info[3], Info[4], Info[5], 0.18)
+                        love.graphics.polygon("fill", Ox, Oy, Ax, Ay, Cx, Cy, Bx, By)
+                        love.graphics.setColor(Info[3], Info[4], Info[5], 0.55)
+                        love.graphics.setLineWidth(1)
+                        love.graphics.polygon("line", Ox, Oy, Ax, Ay, Cx, Cy, Bx, By)
+                    end
+                end
+            end
+        end
+
+        for _, Name in ipairs(AXIS_ORDER) do
+            local Ax = Handles.Axes[Name]
+            if Ax and Name ~= TopAxis then
+                DrawAxisArrow(Ax, false)
+                if Tool == "Scale" then
+                    love.graphics.setColor(Ax.Color[1], Ax.Color[2], Ax.Color[3], 0.9)
+                    love.graphics.rectangle("fill",
+                        Ax.TipScreen[1] - 5, Ax.TipScreen[2] - 5, 10, 10)
+                end
+            end
+        end
+
+        local Ox, Oy = Handles.OriginScreen[1], Handles.OriginScreen[2]
+        love.graphics.setColor(0.95, 0.95, 0.25, 1)
+        love.graphics.rectangle("fill", Ox - 4, Oy - 4, 8, 8)
+
+        if Tool == "Move" and TopPlane then
+            local Planes = {
+                XY = { "X", "Y", 1, 1, 0.25 },
+                XZ = { "X", "Z", 1, 0.35, 1 },
+                YZ = { "Y", "Z", 0.25, 1, 1 },
+            }
+            local Info = Planes[TopPlane]
+            local A = Handles.Axes[Info[1]]
+            local B = Handles.Axes[Info[2]]
+            if A and B then
+                local Ax = Ox + (A.TipScreen[1] - Ox) * 0.32
+                local Ay = Oy + (A.TipScreen[2] - Oy) * 0.32
+                local Bx = Ox + (B.TipScreen[1] - Ox) * 0.32
+                local By = Oy + (B.TipScreen[2] - Oy) * 0.32
+                local Cx = Ax + (Bx - Ox)
+                local Cy = Ay + (By - Oy)
+                love.graphics.setColor(Info[3], Info[4], Info[5], 0.55)
+                love.graphics.polygon("fill", Ox, Oy, Ax, Ay, Cx, Cy, Bx, By)
+                love.graphics.setColor(Info[3], Info[4], Info[5], 1)
                 love.graphics.setLineWidth(2)
-                love.graphics.polygon("line", ox, oy, ax, ay, cx, cy, bx, by)
+                love.graphics.polygon("line", Ox, Oy, Ax, Ay, Cx, Cy, Bx, By)
                 love.graphics.setLineWidth(1)
             end
         end
 
-        -- 5) hovered / active axis LAST (highest z)
-        if topAxis and handles.axes[topAxis] then
-            local ax = handles.axes[topAxis]
-            DrawAxisArrow(ax, true)
-            if tool == "Scale" then
-                love.graphics.setColor(ax.color[1], ax.color[2], ax.color[3], 1)
+        if TopAxis and Handles.Axes[TopAxis] then
+            local Ax = Handles.Axes[TopAxis]
+            DrawAxisArrow(Ax, true)
+            if Tool == "Scale" then
+                love.graphics.setColor(Ax.Color[1], Ax.Color[2], Ax.Color[3], 1)
                 love.graphics.rectangle("fill",
-                    ax.tipScreen[1] - 6, ax.tipScreen[2] - 6, 12, 12)
+                    Ax.TipScreen[1] - 6, Ax.TipScreen[2] - 6, 12, 12)
             end
         end
 
-    elseif tool == "Rotate" then
-        -- non-hovered rings first
-        for _, name in ipairs(AXIS_ORDER) do
-            local ring = handles.rings[name]
-            if ring and name ~= topAxis then
-                DrawRing(ring, false)
+    elseif Tool == "Rotate" then
+        for _, Name in ipairs(AXIS_ORDER) do
+            local Ring = Handles.Rings[Name]
+            if Ring and Name ~= TopAxis then
+                DrawRing(Ring, false)
             end
         end
-        -- center
-        local ox, oy = handles.originScreen[1], handles.originScreen[2]
+        local Ox, Oy = Handles.OriginScreen[1], Handles.OriginScreen[2]
         love.graphics.setColor(0.95, 0.95, 0.25, 1)
-        love.graphics.circle("fill", ox, oy, 4)
-        -- hovered / active ring on top
-        if topAxis and handles.rings[topAxis] then
-            DrawRing(handles.rings[topAxis], true)
+        love.graphics.rectangle("fill", Ox - 4, Oy - 4, 8, 8)
+        if TopAxis and Handles.Rings[TopAxis] then
+            DrawRing(Handles.Rings[TopAxis], true)
         end
     end
 end

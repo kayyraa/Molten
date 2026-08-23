@@ -1,4 +1,3 @@
--- Services/TextBox.lua
 local TextBox = {}
 local Active = nil
 
@@ -16,10 +15,6 @@ local function FilterChar(ch, filter)
     end
     return ch
 end
-
--- ---------------------------------------------------------------------------
--- Line helpers (only used by multiline buffers, e.g. the script editor)
--- ---------------------------------------------------------------------------
 
 local function SplitLines(Source)
     local Lines = {}
@@ -78,8 +73,6 @@ function TextBox.Begin(opts)
         OnChange = opts.onChange,
         OnCommit = opts.onCommit,
         OnCancel = opts.onCancel,
-        -- Optional hook: if set, HandleKey/HandleTextInput give it first refusal.
-        -- Should return true if it consumed the key/input.
         AutocompleteHandler = opts.autocompleteHandler,
     }
     ClampCursor(Active)
@@ -116,9 +109,11 @@ function TextBox.HandleTextInput(Text)
         Active.Cursor = 1
         Active.SelectAll = false
     end
+    if Active.Cursor < 1 then Active.Cursor = 1 end
+    if Active.Cursor > #Active.Buffer + 1 then Active.Cursor = #Active.Buffer + 1 end
     local filtered = ""
     for i = 1, #Text do
-        local c = Text:sub(i,i)
+        local c = Text:sub(i, i)
         filtered = filtered .. FilterChar(c, Active.Filter)
     end
     if filtered == "" then return true end
@@ -135,9 +130,6 @@ function TextBox.HandleKey(Key)
     if not Active then return false end
     local s = Active
 
-    -- Autocomplete popup gets first refusal on navigation/accept keys so
-    -- Up/Down/Tab/Enter/Escape can drive the suggestion list instead of
-    -- the buffer cursor while the popup is open.
     if s.AutocompleteHandler and s.AutocompleteHandler("key", Key) then
         return true
     end
@@ -185,7 +177,6 @@ function TextBox.HandleKey(Key)
 
     elseif Key == "up" or Key == "down" then
         if not s.Multiline then
-            -- Single-line boxes have no concept of up/down; ignore.
             return true
         end
 
@@ -194,8 +185,6 @@ function TextBox.HandleKey(Key)
         local Lines = SplitLines(s.Buffer)
         local Line, Col = CursorLineCol(s.Buffer, s.Cursor)
 
-        -- Preserve horizontal position across lines of different length,
-        -- like a normal code editor caret.
         local TargetCol = s.DesiredCol or Col
         s.DesiredCol = TargetCol
 
@@ -280,6 +269,31 @@ function TextBox.HandleKey(Key)
     return false
 end
 
+
+function TextBox.FormatDisplay(state)
+    state = state or Active
+    if not state then
+        return ""
+    end
+    return state.Buffer or ""
+end
+
+function TextBox.GetCaretInfo(state)
+    state = state or Active
+    if not state then
+        return false, 1, ""
+    end
+    local Buf = state.Buffer or ""
+    local Cur = state.Cursor or (#Buf + 1)
+    if Cur < 1 then Cur = 1 end
+    if Cur > #Buf + 1 then Cur = #Buf + 1 end
+    local Show = (math.floor(love.timer.getTime() * 2) % 2) == 0
+    if state.SelectAll and #Buf > 0 then
+        Show = true
+    end
+    return Show, Cur, Buf
+end
+
 function TextBox.Commit()
     if not Active then return false end
     local cb = Active.OnCommit
@@ -304,8 +318,6 @@ function TextBox.Cancel()
     return true
 end
 
--- Exposed for other modules (e.g. ScriptEditor / autocomplete) that need
--- to reason about line/column without duplicating this logic.
 TextBox.SplitLines = SplitLines
 TextBox.CursorLineCol = CursorLineCol
 TextBox.CursorFromLineCol = CursorFromLineCol

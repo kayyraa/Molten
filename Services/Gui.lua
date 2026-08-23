@@ -7,16 +7,12 @@ local function SafeText(s)
     if s == nil then
         return ""
     end
-
     s = tostring(s)
-
     local out = {}
     local i = 1
     local n = #s
-
     while i <= n do
         local c = s:byte(i)
-
         if c < 128 then
             if c >= 32 or c == 9 or c == 10 then
                 out[#out + 1] = string.char(c)
@@ -38,7 +34,6 @@ local function SafeText(s)
             i = i + 1
         end
     end
-
     return table.concat(out)
 end
 
@@ -50,17 +45,17 @@ Gui.Console = {
 local CachedFontPath
 local FontCache = {}
 local ClickedThisFrame = false
+local ClickCancelled = false
 
--- Global topmost hit target for this frame (ZIndex + DisplayOrder aware)
 local HitNode = nil
 local HitScore = -1e18
 local HitSerial = 0
 local PrevHover = nil
 local RenderDepth = 0
+local HoverCursor = nil
 
 local function HitConsider(node, score)
     HitSerial = HitSerial + 1
-    -- Later same-score nodes win (drawn on top when equal ZIndex)
     local s = score + HitSerial * 1e-6
     if s >= HitScore then
         HitScore = s
@@ -68,14 +63,24 @@ local function HitConsider(node, score)
     end
 end
 
-local function HasClickHandler(node)
-    if not node then return false end
-    local sig = rawget(node, "OnClick")
+local function SignalHasHandlers(sig)
     if not sig then return false end
     if type(sig.HasConnections) == "function" then
-        return sig:HasConnections()
+        local Ok, Has = pcall(function() return sig:HasConnections() end)
+        if Ok then return Has and true or false end
     end
-    -- Fallback: treat as connected if Fire exists (legacy)
+    return false
+end
+
+local function HasClickHandler(node)
+    if not node then return false end
+    return SignalHasHandlers(rawget(node, "OnClick"))
+end
+
+local function HasHoverHandler(node)
+    if not node then return false end
+    if SignalHasHandlers(rawget(node, "OnEnter")) then return true end
+    if SignalHasHandlers(rawget(node, "OnLeave")) then return true end
     return false
 end
 
@@ -92,46 +97,108 @@ local function FindClickable(node)
     return nil
 end
 
+local function FindHoverTarget(node)
+    local cur = node
+    local guard = 0
+    while cur and guard < 32 do
+        guard = guard + 1
+        if HasHoverHandler(cur) then
+            return cur
+        end
+        cur = rawget(cur, "_Parent") or rawget(cur, "Parent")
+    end
+    return nil
+end
+
+local function IsDescendantOf(Node, Ancestor)
+    if not Node or not Ancestor then return false end
+    local Cur = Node
+    local Guard = 0
+    while Cur and Guard < 48 do
+        Guard = Guard + 1
+        if Cur == Ancestor then return true end
+        Cur = rawget(Cur, "_Parent") or rawget(Cur, "Parent")
+    end
+    return false
+end
+
 local function HitFinalize()
-    local top = HitNode
+    local Top = HitNode
+    local HoverTarget = FindHoverTarget(Top)
 
-    -- Hover enter/leave only for the true topmost node
-    if PrevHover and PrevHover ~= top then
-        rawset(PrevHover, "_IsHovered", false)
-        if PrevHover.OnLeave then
-            pcall(function() PrevHover.OnLeave:Fire() end)
+    if PrevHover ~= HoverTarget then
+        if PrevHover then
+            rawset(PrevHover, "_IsHovered", false)
+            if PrevHover.OnLeave then
+                pcall(function() PrevHover.OnLeave:Fire() end)
+            end
         end
-    end
-    if top and top ~= PrevHover then
-        rawset(top, "_IsHovered", true)
-        if top.OnEnter then
-            pcall(function() top.OnEnter:Fire() end)
+        if HoverTarget then
+            rawset(HoverTarget, "_IsHovered", true)
+            if HoverTarget.OnEnter then
+                pcall(function() HoverTarget.OnEnter:Fire() end)
+            end
         end
+        PrevHover = HoverTarget
     end
-    if top then
-        rawset(top, "_IsHovered", true)
-    end
-    PrevHover = top
 
-    -- Click: bubble to nearest ancestor with OnClick (labels often cover buttons)
-    if ClickedThisFrame and top then
-        local clickable = FindClickable(top)
-        if clickable and clickable.OnClick then
-            pcall(function() clickable.OnClick:Fire() end)
+    if ClickedThisFrame and not ClickCancelled and Top then
+        local Clickable = FindClickable(Top)
+        if Clickable and Clickable.OnClick then
+            pcall(function() Clickable.OnClick:Fire() end)
         end
     end
+
+    HoverCursor = nil
+    if Top then
+        local Cur = Top
+        local Guard = 0
+        while Cur and Guard < 32 do
+            Guard = Guard + 1
+            local Mc = rawget(Cur, "MouseCursor")
+            if Mc == nil then
+                Mc = rawget(Cur, "Cursor")
+            end
+            if type(Mc) == "string" and Mc ~= "" then
+                if Mc == "arrow" or Mc == "default" or Mc == "pointer" then
+                    HoverCursor = nil
+                elseif Mc == "hand" or Mc == "ibeam" or Mc == "sizewe" or Mc == "sizens" then
+                    HoverCursor = Mc
+                else
+                    HoverCursor = nil
+                end
+                break
+            end
+            if HasClickHandler(Cur) then
+                HoverCursor = "hand"
+                break
+            end
+            Cur = rawget(Cur, "_Parent") or rawget(Cur, "Parent")
+        end
+    end
+end
+
+function Gui:GetHoverCursor()
+    return HoverCursor
 end
 
 function Gui:NotifyMousePressed()
     ClickedThisFrame = true
+    ClickCancelled = false
+end
+
+function Gui:CancelClick()
+    ClickCancelled = true
+    ClickedThisFrame = false
 end
 
 function Gui:ClearClickFlag()
-    -- Finalize input AFTER all Gui:Render roots this frame (StarterGui + CoreGui)
     HitFinalize()
     ClickedThisFrame = false
+    ClickCancelled = false
     HitNode = nil
     HitScore = -1e18
+    HitSerial = 0
 end
 
 local function GetProp(Node, Name)
@@ -139,16 +206,13 @@ local function GetProp(Node, Name)
     if Direct ~= nil then
         return Direct
     end
-
     local Attributes = rawget(Node, "Attributes")
     if Attributes and Attributes[Name] ~= nil then
         return Attributes[Name]
     end
-
     if Node.GetAttribute then
         return Node:GetAttribute(Name)
     end
-
     return nil
 end
 
@@ -156,12 +220,10 @@ local function ResolveUDim2(Val, ParentW, ParentH)
     if not Val then
         return 0, 0
     end
-
     local Sx = Val[1] or 0
     local Ox = Val[2] or 0
     local Sy = Val[3] or 0
     local Oy = Val[4] or 0
-
     return Sx * ParentW + Ox, Sy * ParentH + Oy
 end
 
@@ -169,7 +231,6 @@ local function ResolveAnchor(Val)
     if not Val then
         return 0, 0
     end
-
     return Val[1] or 0, Val[2] or 0
 end
 
@@ -186,7 +247,6 @@ local function GetUiPadding(Node)
     if not Children then
         return 0, 0, 0, 0
     end
-
     for Index = 1, #Children do
         local Child = Children[Index]
         if rawget(Child, "ClassName") == "UiPadding" then
@@ -197,24 +257,17 @@ local function GetUiPadding(Node)
             return (Pl[2] or 0), (Pr[2] or 0), (Pt[2] or 0), (Pb[2] or 0)
         end
     end
-
     return 0, 0, 0, 0
 end
-
--- ---------------------------------------------------------------------------
--- Render
--- ---------------------------------------------------------------------------
 
 function Gui:Render(Node, ParentX, ParentY, ParentW, ParentH)
     local CanvasW, CanvasH = UDim.CanvasDimentions()
     Node = Node or _G.Gui or _G.StarterGui
-
     if not Node then
         return
     end
 
     if RenderDepth == 0 then
-        -- First root Render this frame: start fresh hit accumulation
         HitNode = nil
         HitScore = -1e18
         HitSerial = 0
@@ -244,7 +297,6 @@ function Gui:Render(Node, ParentX, ParentY, ParentW, ParentH)
     for Index = 1, #Children do
         local Child = Children[Index]
         local ClassName = rawget(Child, "ClassName")
-
         if ClassName == "ScreenGui" or ClassName == "StarterGui" then
             GuiList[#GuiList + 1] = Child
         else
@@ -262,7 +314,6 @@ function Gui:Render(Node, ParentX, ParentY, ParentW, ParentH)
         local GuiElement = GuiList[Index]
         if GetProp(GuiElement, "Enabled") ~= false then
             local dorder = GetProp(GuiElement, "DisplayOrder") or 0
-            -- Stamp layer onto this ScreenGui so descendants can inherit via parent walk
             rawset(GuiElement, "_LayerOrder", dorder)
             Gui:Render(GuiElement, ParentX, ParentY, ParentW, ParentH)
         end
@@ -277,7 +328,6 @@ function Gui:Render(Node, ParentX, ParentY, ParentW, ParentH)
     for Index = 1, #ObjectList do
         local Child = ObjectList[Index]
 
-        -- Floating overlays parented under CoreGui/Folder: boost layer so they beat ScreenGui
         if rawget(Child, "_LayerOrder") == nil then
             local z = GetProp(Child, "ZIndex") or 1
             if z >= 100 then
@@ -289,7 +339,7 @@ function Gui:Render(Node, ParentX, ParentY, ParentW, ParentH)
             if rawget(Child, "_IsHovered") then
                 rawset(Child, "_IsHovered", false)
                 if Child.OnLeave then
-                    Child.OnLeave:Fire()
+                    pcall(function() Child.OnLeave:Fire() end)
                 end
             end
             goto ContinueChild
@@ -308,7 +358,6 @@ function Gui:Render(Node, ParentX, ParentY, ParentW, ParentH)
             AbsX = ParentX + PosX - W * AncX
             AbsY = ParentY + PosY - H * AncY
 
-            -- Inherit ScreenGui / parent layer so overlays on CoreGui beat ScreenGui content
             if rawget(Child, "_LayerOrder") == nil then
                 local parentLayer = rawget(Node, "_LayerOrder")
                 if parentLayer ~= nil then
@@ -317,16 +366,13 @@ function Gui:Render(Node, ParentX, ParentY, ParentW, ParentH)
             end
 
             local IsHovered = not MouseLocked
-                and (MouseX >= AbsX and MouseX <= AbsX + W and MouseY >= AbsY and MouseY <= AbsY + H)
+                and (MouseX >= AbsX and MouseX < AbsX + W and MouseY >= AbsY and MouseY < AbsY + H)
 
             if IsHovered then
-                -- Effective depth: DisplayOrder (ScreenGui layer) + ZIndex
-                -- Higher ZIndex always wins over lower, regardless of tree order.
                 local z = GetProp(Child, "ZIndex") or 1
                 local layer = rawget(Child, "_LayerOrder") or 0
-                -- Prefer nodes that actually handle clicks when ZIndex ties
-                local interactive = HasClickHandler(Child) and 1 or 0
-                HitConsider(Child, layer * 1000000 + z * 1000 + interactive * 0.5)
+                local interactive = (HasClickHandler(Child) or HasHoverHandler(Child)) and 10 or 0
+                HitConsider(Child, layer * 1000000 + z * 1000 + interactive)
             end
 
             local BgColor = GetProp(Child, "BackgroundColor")
@@ -353,7 +399,6 @@ function Gui:Render(Node, ParentX, ParentY, ParentW, ParentH)
                 local Sx, Sy, Sw, Sh = love.graphics.getScissor()
                 HadClip = Sx ~= nil
                 ClipX, ClipY, ClipW, ClipH = Sx, Sy, Sw, Sh
-
                 if HadClip then
                     local X2 = math.min(Sx + Sw, ContentX + ContentW)
                     local Y2 = math.min(Sy + Sh, ContentY + ContentH)
@@ -369,7 +414,6 @@ function Gui:Render(Node, ParentX, ParentY, ParentW, ParentH)
                 local Image = GetProp(Child, "Image")
                 if Image then
                     local ImageColor = GetProp(Child, "ImageColor") or {1, 1, 1, 1}
-                    -- Integer size + center so scaled icons don't smear
                     local iw = math.max(1, math.floor(W + 0.5))
                     local ih = math.max(1, math.floor(H + 0.5))
                     local cx = math.floor(AbsX + W * 0.5 + 0.5)
@@ -381,11 +425,9 @@ function Gui:Render(Node, ParentX, ParentY, ParentW, ParentH)
                 local TextColor = GetProp(Child, "TextColor") or {0, 0, 0, 1}
                 local TextSize = GetProp(Child, "TextSize") or 14
                 local FontPath = GetProp(Child, "Font") or CachedFontPath
-
                 if FontPath then
                     Gui:Font(FontPath, TextSize)
                 end
-
                 local Alignment = GetProp(Child, "TextAlignment") or {"Left", "Center"}
                 local XAlign = Alignment[1] or "Left"
                 local YAlign = Alignment[2] or "Center"
@@ -393,7 +435,6 @@ function Gui:Render(Node, ParentX, ParentY, ParentW, ParentH)
                 local Th = FontObj:getHeight()
                 local DrawX = ContentX
                 local DrawY = ContentY
-
                 if YAlign == "Top" then
                     DrawY = ContentY
                 elseif YAlign == "Bottom" then
@@ -401,19 +442,31 @@ function Gui:Render(Node, ParentX, ParentY, ParentW, ParentH)
                 else
                     DrawY = ContentY + (ContentH - Th) * 0.5
                 end
-
-                -- Whole-pixel placement prevents blurry sub-pixel glyphs
                 DrawX = math.floor(DrawX + 0.5)
                 DrawY = math.floor(DrawY + 0.5)
                 local TextW = math.max(1, math.floor(ContentW + 0.5))
-
                 local AlignString = string.lower(XAlign)
                 if AlignString ~= "center" and AlignString ~= "right" then
                     AlignString = "left"
                 end
-
                 love.graphics.setColor(TextColor[1], TextColor[2], TextColor[3], TextColor[4] or 1)
-                pcall(love.graphics.printf, SafeText(Text), DrawX, DrawY, TextW, AlignString)
+                local Wrapped = GetProp(Child, "TextWrapped")
+                if Wrapped == false then
+                    local FontObj2 = love.graphics.getFont()
+                    local Tw = FontObj2:getWidth(SafeText(Text))
+                    if Tw > TextW and TextW > 4 then
+                        local S = SafeText(Text)
+                        while #S > 1 and FontObj2:getWidth(S .. "...") > TextW do
+                            S = S:sub(1, #S - 1)
+                        end
+                        S = S .. "..."
+                        pcall(love.graphics.print, S, DrawX, DrawY)
+                    else
+                        pcall(love.graphics.print, SafeText(Text), DrawX, DrawY)
+                    end
+                else
+                    pcall(love.graphics.printf, SafeText(Text), DrawX, DrawY, TextW, AlignString)
+                end
             end
 
             local Nested = rawget(Child, "Children")
@@ -428,11 +481,6 @@ function Gui:Render(Node, ParentX, ParentY, ParentW, ParentH)
                     love.graphics.setScissor()
                 end
             end
-        else
-            local Nested = rawget(Child, "Children")
-            if Nested and #Nested > 0 then
-                Gui:Render(Child, AbsX, AbsY, W, H)
-            end
         end
 
         ::ContinueChild::
@@ -440,10 +488,6 @@ function Gui:Render(Node, ParentX, ParentY, ParentW, ParentH)
 
     RenderDepth = RenderDepth - 1
 end
-
--- ---------------------------------------------------------------------------
--- Primitive drawing
--- ---------------------------------------------------------------------------
 
 function Gui:DrawText(Text, Position, ColorValue, Align, Background, FontSize)
     local PrevFont = love.graphics.getFont()
@@ -525,7 +569,6 @@ function Gui:DrawImage(Path, Position, Size, ColorValue)
         local Success, Result = pcall(love.graphics.newImage, Path)
         if Success then
             Image = Result
-            -- Smooth resampling (not blocky nearest) for UI icons
             pcall(function()
                 Image:setFilter("linear", "linear")
             end)
@@ -546,7 +589,6 @@ function Gui:DrawImage(Path, Position, Size, ColorValue)
     local ScaleX = dstW / srcW
     local ScaleY = dstH / srcH
 
-    -- Snap to whole pixels so scaled icons stay sharp
     local px = math.floor((Position[1] or 0) + 0.5)
     local py = math.floor((Position[2] or 0) + 0.5)
 
@@ -574,7 +616,6 @@ end
 
 function Gui:Font(Path, Size)
     Size = Size or 16
-    -- Rasterize at integer pixel size for crisp glyphs
     Size = math.max(1, math.floor(Size + 0.5))
     CachedFontPath = Path
 
@@ -583,7 +624,6 @@ function Gui:Font(Path, Size)
 
     if not Font then
         Font = love.graphics.newFont(Path, Size)
-        -- Linear filter keeps small anti-aliased text smooth instead of chunky
         pcall(function()
             Font:setFilter("linear", "linear")
         end)
@@ -647,4 +687,5 @@ function Gui.Console:Draw()
     end
 end
 
+_G.Gui = Gui
 return Gui
